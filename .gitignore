@@ -1,0 +1,14 @@
+.env
+server/server
+*.exe
+*.out
+
+.pio/
+build/
+.vscode/
+
+*.bin
+*.gguf
+*.onnx
+*.wav
+*.mp3
