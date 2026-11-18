@@ -43,7 +43,7 @@ func main() {
 		if err!=nil{
 			fmt.Println(err)
 		}else{
-			fmt.Printf("%s, %d, %d ,%d ",Addr,header.Seq,header.Msgtype,header.Length)
+			fmt.Printf("%s, %d, %d ,%d \n",Addr,header.Seq,header.Msgtype,header.Length)
 		}
 		syncpool.Put(bufPtr)
 	}
