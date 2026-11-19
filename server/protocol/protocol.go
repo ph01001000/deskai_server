@@ -10,6 +10,7 @@ const HeaderSize = 9
 const MaxSamples = 512
 const MsgTypeMic = 1
 const MsgTypeTTS = 2
+const MsgTypeStop = 3
 
 type PacketHeader struct {
 	Seq     uint32
@@ -44,19 +45,17 @@ func DecodePacket(buf []byte) (PacketHeader, []byte, error) {
 	return hdr, buf[HeaderSize : HeaderSize+int(hdr.Length)], nil
 }
 
-
-func EncodePacket(buf []byte, hdr PacketHeader, payload []byte) (int, error){
-	if len(payload) > MaxSamples*2{
-		return 0,errors.New("payload size bigger than SampleSize")
+func EncodePacket(buf []byte, hdr PacketHeader, payload []byte) (int, error) {
+	if len(payload) > MaxSamples*2 {
+		return 0, errors.New("payload size bigger than SampleSize")
 	}
-	if len(buf) < HeaderSize + len(payload){
-		return 0,errors.New("dst buffer too small")
+	if len(buf) < HeaderSize+len(payload) {
+		return 0, errors.New("dst buffer too small")
 	}
-	
 
-	binary.LittleEndian.PutUint32(buf[0:4],hdr.Seq)
-	binary.LittleEndian.PutUint16(buf[4:6],MagicValue)
-	binary.LittleEndian.PutUint16(buf[6:8],uint16(len(payload)))
+	binary.LittleEndian.PutUint32(buf[0:4], hdr.Seq)
+	binary.LittleEndian.PutUint16(buf[4:6], MagicValue)
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(len(payload)))
 	buf[8] = hdr.Msgtype
 
 	copy(buf[HeaderSize:], payload)

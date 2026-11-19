@@ -3,8 +3,9 @@ package ai
 import (
 	"context"
 	"errors"
-	"google.golang.org/genai"
 	"strings"
+
+	"google.golang.org/genai"
 )
 
 type GeminiClient struct {
@@ -20,7 +21,7 @@ func NewGeminiClient(ctx context.Context, apiKey string) (*GeminiClient, error) 
 	if err != nil {
 		return nil, err
 	}
-	NewClient := GeminiClient{client: nclient, model: "gemini-flash-latest"}
+	NewClient := GeminiClient{client: nclient, model: "gemini-3.1-flash-lite"}
 	return &NewClient, nil
 }
 
