@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"google.golang.org/genai"
 )
 
 // const endpoint="https://api.groq.com/openai/v1/audio/transcriptions"
@@ -29,6 +31,21 @@ func getEnvOrDefault(key, defaultValue string) string {
 func NewSTTFromEnv() (STTProvider, error) {
 	provider := strings.ToLower(getEnvOrDefault("STT_PROVIDER", "local"))
 	switch provider {
+	case "gemini":
+		apikey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+		if apikey == "" {
+			return nil, errors.New("GEMINI_API_KEY required for gemini STT")
+		}
+		client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+			APIKey:      apikey,
+			Backend:     genai.BackendGeminiAPI,
+			HTTPOptions: genai.HTTPOptions{APIVersion: "v1beta"},
+		})
+		if err != nil {
+			return nil, err
+		}
+		model := getEnvOrDefault("STT_MODEL", "gemini-2.5-flash")
+		return NewGeminiSTT(client, model), nil
 	case "cloud":
 		api := strings.TrimSpace(os.Getenv("STT_API_KEY"))
 		if api == "" {
@@ -48,6 +65,22 @@ func NewSTTFromEnv() (STTProvider, error) {
 func NewTTSFromEnv() (TTSProvider, error) {
 	provider := getEnvOrDefault("TTS_PROVIDER", "local")
 	switch provider {
+	case "gemini":
+		key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+		if key == "" {
+			return nil, errors.New("GEMINI_API_KEY required for gemini TTS")
+		}
+		client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+			APIKey:      key,
+			Backend:     genai.BackendGeminiAPI,
+			HTTPOptions: genai.HTTPOptions{APIVersion: "v1beta"},
+		})
+		if err != nil {
+			return nil, err
+		}
+		model := getEnvOrDefault("TTS_MODEL", "gemini-3.8-flash-lite-tts")
+		voice := getEnvOrDefault("TTS_VOICE", "Kore")
+		return NewGeminiTTS(client, model, voice), nil
 	case "cloud":
 		api := strings.TrimSpace(os.Getenv("TTS_API_KEY"))
 		if api == "" {

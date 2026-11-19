@@ -40,7 +40,7 @@ func (g *GeminiClient) Reply(ctx context.Context, prompt string) (string, error)
 	}
 
 	res, err := g.client.Models.GenerateContent(ctx, g.model, genai.Text(prompt), &genai.GenerateContentConfig{
-		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "You are a concise voice desk assistant. Reply in 1-3 plain spoken sentences with NO markdown, asterisks, or bullet points, talk and answer question in a cool badass manner, an assistant and a cool friend."}}},
+		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "You are a concise voice desk assistant. Reply in 1-3 plain spoken sentences with NO markdown, asterisks, or bullet points, talk and answer question in a cool badass manner, an assistant and a cool friend and badass does not mean genz, be cool"}}},
 	})
 
 	if err != nil {
