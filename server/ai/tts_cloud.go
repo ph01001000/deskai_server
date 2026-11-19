@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type CloudTTS struct {
@@ -20,7 +21,7 @@ type CloudTTS struct {
 }
 
 func NewCloudTTS(endpoint, apikey, model, voice string) *CloudTTS {
-	return &CloudTTS{endpoint: endpoint, apikey: apikey, model: model, voice: voice}
+	return &CloudTTS{endpoint: endpoint, apikey: apikey, model: model, voice: voice, client: &http.Client{Timeout: 15 * time.Second}}
 }
 
 func (c *CloudTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {

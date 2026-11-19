@@ -15,14 +15,23 @@ type GeminiClient struct {
 
 func NewGeminiClient(ctx context.Context, apiKey string) (*GeminiClient, error) {
 	if len(apiKey) == 0 {
-		return nil, errors.New("Empty Api")
+		return nil, errors.New("empty API key")
 	}
-	nclient, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey, Backend: genai.BackendGeminiAPI})
+	nclient, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+		HTTPOptions: genai.HTTPOptions{
+			APIVersion: "v1beta",
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
-	NewClient := GeminiClient{client: nclient, model: "gemini-3.1-flash-lite"}
-	return &NewClient, nil
+	newClient := GeminiClient{
+		client: nclient,
+		model:  "gemini-3.5-flash-lite", // stable, fast, listed in your out.txt!
+	}
+	return &newClient, nil
 }
 
 func (g *GeminiClient) Reply(ctx context.Context, prompt string) (string, error) {
