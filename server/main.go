@@ -64,7 +64,7 @@ func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
 			return
 		}
 		seq++
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
 	}
 
 }
@@ -127,7 +127,10 @@ func main() {
 
 		if header.Msgtype == protocol.MsgTypeMic {
 			rms := audio.ComputeRMS(payload)
-			if rms > 300 {
+			if header.Seq%31 == 0 {
+				fmt.Printf("RX from %s seq=%d rms=%.1f\n", Addr, header.Seq, rms)
+			}
+			if rms > 2000 { // Change this line according to your room average rms peak, check first by testing mic.
 				recording = true
 				silenceCount = 0
 			} else if recording {
