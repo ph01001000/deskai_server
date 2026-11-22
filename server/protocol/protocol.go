@@ -11,6 +11,10 @@ const MaxSamples = 512
 const MsgTypeMic = 1
 const MsgTypeTTS = 2
 const MsgTypeStop = 3
+const MsgTypeStatus = 4
+const StateListening = 0
+const StateThinking = 1
+const StateSpeaking = 2
 
 type PacketHeader struct {
 	Seq     uint32

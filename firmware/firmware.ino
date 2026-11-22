@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <U8g2lib.h>
 #include <lwip/sockets.h>
 #include <errno.h>
 #include <driver/i2s_std.h>
@@ -17,7 +19,13 @@ static const uint16_t LOCAL_UDP_PORT   = 8001;
 static const uint16_t PROTOCOL_MAGIC   = 0xAE05;
 static const uint8_t  MSG_TYPE_MIC     = 1;
 static const uint8_t  MSG_TYPE_TTS     = 2;
+static const uint8_t  MSG_TYPE_STATUS  = 4;
 
+static const uint8_t  STATE_LISTENING  = 0;
+static const uint8_t  STATE_THINKING   = 1;
+static const uint8_t  STATE_SPEAKING   = 2;
+
+// Exact pins from your wiring diagram
 #define MIC_SCK   33
 #define MIC_WS    32
 #define MIC_SD    35
@@ -26,12 +34,18 @@ static const uint8_t  MSG_TYPE_TTS     = 2;
 #define AMP_LRC   25
 #define AMP_DOUT  27
 
+#define OLED_SDA  21
+#define OLED_SCL  22
+
 static const uint32_t MIC_SAMPLE_RATE   = 16000;
 static const uint32_t AMP_SAMPLE_RATE   = 24000;
 static const size_t   MIC_SAMPLES       = 512;
 static const size_t   RINGBUF_BYTES     = 65536; // ~1.36 s jitter buffer @ 24 kHz
-static const size_t   PREBUF_WATERMARK  = 12288; // ~256 ms pre-buffer before playback
-static const float    PLAYBACK_GAIN     = 0.45f; // Crisp desk volume, USB-safe
+static const size_t   PREBUF_WATERMARK  = 12288; // ~256 ms pre-buffer before playing
+static const float    PLAYBACK_GAIN     = 0.60f;
+
+// 0.96" SSD1306 128x64 I2C OLED
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 static i2s_chan_handle_t rx_handle      = NULL;
 static i2s_chan_handle_t tx_handle      = NULL;
@@ -42,6 +56,13 @@ static struct sockaddr_in serverAddr    = {};
 
 static volatile bool     isSpeaking     = false;
 static volatile uint32_t lastSpeakEndMs = 0;
+
+// Thread-safe UI state shared between NetRxTask, AmpTask, and OledTask
+static portMUX_TYPE     uiMux           = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint8_t uiState         = STATE_LISTENING;
+static volatile bool    pendingListen   = false;
+static char             uiText[512]     = "";
+static volatile bool    uiTextChanged   = false;
 
 bool initMicI2S() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -72,10 +93,10 @@ bool initAmpI2S() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num  = 8;
     chan_cfg.dma_frame_num = 256;
+    chan_cfg.auto_clear    = true; // Zero-fills DMA on underrun: eliminates tail buzz!
 
     if (i2s_new_channel(&chan_cfg, &tx_handle, NULL) != ESP_OK) return false;
 
-    // 16-bit STEREO (duplicating mono sample into L+R) avoids ESP32 16-bit mono FIFO swap crackle
     i2s_std_config_t std_cfg = {};
     std_cfg.clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(AMP_SAMPLE_RATE);
     std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
@@ -95,7 +116,7 @@ bool initAmpI2S() {
 }
 
 void flushSilence() {
-    static int16_t zeros[512] = {0}; // 256 stereo frames
+    static int16_t zeros[512] = {0};
     for (int i = 0; i < 8; i++) {
         size_t written = 0;
         i2s_channel_write(tx_handle, zeros, sizeof(zeros), &written, pdMS_TO_TICKS(50));
@@ -103,7 +124,7 @@ void flushSilence() {
 }
 
 void playReadyChirp() {
-    static int16_t buf[512]; // 256 stereo frames
+    static int16_t buf[512];
     for (int c = 0; c < 14; c++) {
         for (size_t i = 0; i < 256; i++) {
             float t = (float)(c * 256 + i) / (float)AMP_SAMPLE_RATE;
@@ -173,40 +194,49 @@ void micTask(void *param) {
 
 void netRxTask(void *param) {
     static AudioPacket rxPkt;
-    uint32_t rxCount = 0;
-    uint32_t drops   = 0;
 
-    Serial.printf("[NetRx] Listening for TTS on UDP port %u\n", LOCAL_UDP_PORT);
+    Serial.printf("[NetRx] Listening on UDP port %u\n", LOCAL_UDP_PORT);
 
     while (true) {
         int n = recvfrom(udpSock, &rxPkt, sizeof(rxPkt), 0, NULL, NULL);
         if (n < (int)sizeof(PacketHeader)) continue;
         if (rxPkt.header.magic != PROTOCOL_MAGIC) continue;
-        if (rxPkt.header.type != MSG_TYPE_TTS) continue;
         if (rxPkt.header.length == 0 || rxPkt.header.length > 1024) continue;
         if (n < (int)(sizeof(PacketHeader) + rxPkt.header.length)) continue;
 
-        if (xRingbufferSend(audioRingBuf, rxPkt.samples, rxPkt.header.length, 0) != pdTRUE) {
-            drops++;
-        } else {
-            rxCount++;
-            if (rxCount % 25 == 0) {
-                Serial.printf("[NetRx] TTS seq=%lu rx=%lu drops=%lu\n",
-                              (unsigned long)rxPkt.header.seq,
-                              (unsigned long)rxCount,
-                              (unsigned long)drops);
+        if (rxPkt.header.type == MSG_TYPE_TTS) {
+            xRingbufferSend(audioRingBuf, rxPkt.samples, rxPkt.header.length, 0);
+        } else if (rxPkt.header.type == MSG_TYPE_STATUS) {
+            const uint8_t *raw = (const uint8_t *)rxPkt.samples;
+            uint8_t newState = raw[0];
+            size_t textLen = rxPkt.header.length - 1;
+            if (textLen >= sizeof(uiText)) textLen = sizeof(uiText) - 1;
+
+            portENTER_CRITICAL(&uiMux);
+            if (newState == STATE_LISTENING && isSpeaking) {
+                // Keep showing reply text until AmpTask finishes draining the speaker buffer
+                pendingListen = true;
+            } else {
+                uiState = newState;
+                pendingListen = false;
+                if (newState == STATE_SPEAKING && textLen > 0) {
+                    memcpy(uiText, raw + 1, textLen);
+                    uiText[textLen] = '\0';
+                    uiTextChanged = true;
+                }
             }
+            portEXIT_CRITICAL(&uiMux);
         }
     }
 }
 
 void ampTask(void *param) {
-    static int16_t stereoOut[512 * 2]; // 512 mono samples -> 512 stereo frames (2048 B)
+    static int16_t stereoOut[512 * 2];
     bool playing = false;
     uint32_t firstByteTime = 0;
 
     playReadyChirp();
-    Serial.println("[AmpTask] Speaker ready (24 kHz stereo-dup).");
+    Serial.println("[AmpTask] Speaker ready (24 kHz stereo-dup + auto_clear).");
 
     while (true) {
         if (!playing) {
@@ -223,7 +253,6 @@ void ampTask(void *param) {
             if (waiting >= PREBUF_WATERMARK || (millis() - firstByteTime) > 350) {
                 playing = true;
                 isSpeaking = true;
-                Serial.printf("[AmpTask] Playing reply (buffered=%u B)\n", (unsigned)waiting);
             } else {
                 vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
@@ -251,15 +280,138 @@ void ampTask(void *param) {
             isSpeaking = false;
             lastSpeakEndMs = millis();
             firstByteTime = 0;
-            Serial.println("[AmpTask] Done speaking. Mic active again.");
+
+            portENTER_CRITICAL(&uiMux);
+            if (pendingListen || uiState == STATE_SPEAKING) {
+                uiState = STATE_LISTENING;
+                pendingListen = false;
+            }
+            portEXIT_CRITICAL(&uiMux);
         }
+    }
+}
+
+void drawWrappedText(const char *txt, int startLine, int yTop, int maxLines) {
+    u8g2.setFont(u8g2_font_5x8_tf);
+    const int maxChars = 25;
+    int len = strlen(txt);
+    int idx = 0;
+    int lineNum = 0;
+    int drawn = 0;
+    char lineBuf[28];
+
+    while (idx < len && drawn < maxLines) {
+        while (idx < len && txt[idx] == ' ') idx++;
+        if (idx >= len) break;
+
+        int take = len - idx;
+        if (take > maxChars) {
+            take = maxChars;
+            int split = take;
+            while (split > 0 && txt[idx + split] != ' ') split--;
+            if (split > 0) take = split;
+        }
+
+        memcpy(lineBuf, txt + idx, take);
+        lineBuf[take] = '\0';
+
+        if (lineNum >= startLine) {
+            u8g2.drawStr(2, yTop + (drawn * 11), lineBuf);
+            drawn++;
+        }
+        lineNum++;
+        idx += take;
+    }
+}
+
+void oledTask(void *param) {
+    uint32_t lastBlinkMs = millis();
+    bool blinking = false;
+    uint32_t speakStartMs = millis();
+    char localText[512] = "";
+
+    while (true) {
+        uint8_t state;
+        bool textUpdated;
+
+        portENTER_CRITICAL(&uiMux);
+        state = uiState;
+        textUpdated = uiTextChanged;
+        if (textUpdated) {
+            strncpy(localText, uiText, sizeof(localText) - 1);
+            localText[sizeof(localText) - 1] = '\0';
+            uiTextChanged = false;
+        }
+        portEXIT_CRITICAL(&uiMux);
+
+        if (textUpdated) speakStartMs = millis();
+
+        u8g2.clearBuffer();
+
+        if (state == STATE_LISTENING) {
+            uint32_t now = millis();
+            if (!blinking && (now - lastBlinkMs > 3400)) {
+                blinking = true;
+                lastBlinkMs = now;
+            } else if (blinking && (now - lastBlinkMs > 140)) {
+                blinking = false;
+                lastBlinkMs = now;
+            }
+
+            if (blinking) {
+                u8g2.drawRBox(28, 25, 26, 4, 2);
+                u8g2.drawRBox(74, 25, 26, 4, 2);
+            } else {
+                u8g2.drawRBox(28, 12, 26, 30, 6);
+                u8g2.drawRBox(74, 12, 26, 30, 6);
+            }
+            u8g2.setFont(u8g2_font_6x10_tf);
+            u8g2.drawStr(37, 60, "LISTENING");
+
+        } else if (state == STATE_THINKING) {
+            int shift = ((millis() / 450) % 2 == 0) ? 3 : -3;
+            u8g2.drawRBox(28 + shift, 18, 26, 16, 4);
+            u8g2.drawRBox(74 + shift, 18, 26, 16, 4);
+
+            int dots = (millis() / 350) % 4;
+            char label[16] = "THINKING";
+            for (int i = 0; i < dots; i++) strcat(label, ".");
+            u8g2.setFont(u8g2_font_6x10_tf);
+            u8g2.drawStr(35, 58, label);
+
+        } else { // STATE_SPEAKING
+            int bounce = ((millis() / 180) % 2 == 0) ? 0 : 2;
+            u8g2.drawRBox(36, 3 + bounce, 18, 12 - bounce, 3);
+            u8g2.drawRBox(74, 3 + bounce, 18, 12 - bounce, 3);
+            u8g2.drawHLine(0, 18, 128);
+
+            int totalChars = strlen(localText);
+            int estLines = (totalChars + 24) / 25;
+            int maxOffset = (estLines > 4) ? (estLines - 4) : 0;
+            int offset = 0;
+            if (maxOffset > 0) {
+                offset = ((millis() - speakStartMs) / 1600) % (maxOffset + 1);
+            }
+            drawWrappedText(localText, offset, 29, 4);
+        }
+
+        u8g2.sendBuffer();
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.printf("\n=== DeskAI Voice Node (Free heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+    Serial.printf("\n=== DeskAI Voice + OLED Node (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+
+    Wire.begin(OLED_SDA, OLED_SCL);
+    Wire.setClock(400000);
+    u8g2.begin();
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(22, 34, "Connecting WiFi...");
+    u8g2.sendBuffer();
 
     audioRingBuf = xRingbufferCreate(RINGBUF_BYTES, RINGBUF_TYPE_BYTEBUF);
     if (!audioRingBuf || !initMicI2S() || !initAmpI2S()) {
@@ -270,7 +422,6 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    Serial.print("Connecting to Wi-Fi");
     while (WiFi.status() != WL_CONNECTED) {
         delay(300);
         Serial.print(".");
@@ -284,6 +435,7 @@ void setup() {
 
     xTaskCreatePinnedToCore(micTask,   "MicTask",   8192, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(netRxTask, "NetRxTask", 8192, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(oledTask,  "OledTask",  6144, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(ampTask,   "AmpTask",   8192, NULL, 3, NULL, 1);
 }
 

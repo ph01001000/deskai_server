@@ -13,6 +13,7 @@ import (
 	"deskai/ai"
 	"deskai/audio"
 	"deskai/protocol"
+	"sync/atomic"
 )
 
 var syncpool = sync.Pool{
@@ -27,24 +28,46 @@ type utteranceJob struct {
 	addr *net.UDPAddr
 }
 
-func aiWorker(conn *net.UDPConn, pipeline *ai.Pipeline, utterances <-chan utteranceJob) {
+func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utterances <-chan utteranceJob) {
 	for job := range utterances {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		reply, err := pipeline.ProcessUtterance(ctx, job.pcm)
+		sendStatus(conn, job.addr, protocol.StateThinking, "")
+		reply, synth, err := pipeline.ProcessUtterance(ctx, job.pcm)
 		cancel()
+
 		if err != nil {
 			log.Print(err)
+			sendStatus(conn, job.addr, protocol.StateListening, "")
+			aiBusy.Store(false)
 			continue
 		}
-		if len(reply) > 0 {
-			err := os.WriteFile("/tmp/reply.wav", audio.WrapWAV(reply), 0644)
+		if len(reply) > 0 && len(synth) > 0 {
+			err := os.WriteFile("/tmp/reply.wav", audio.WrapWAV(synth), 0644)
 			if err != nil {
 				log.Print(err)
 			}
-			sendTTS(conn, job.addr, reply)
+			sendStatus(conn, job.addr, protocol.StateSpeaking, reply)
+			sendTTS(conn, job.addr, synth)
+			time.Sleep(800 * time.Millisecond)
 		}
-
+		sendStatus(conn, job.addr, protocol.StateListening, "")
+		aiBusy.Store(false)
 	}
+}
+
+func sendStatus(conn *net.UDPConn, addr *net.UDPAddr, state uint8, text string) {
+	if len(text) > 1023 {
+		text = text[:1023]
+	}
+	payload := make([]byte, 1+len(text))
+	payload[0] = state
+	copy(payload[1:], text)
+	pktBuf := make([]byte, protocol.HeaderSize+len(payload))
+	n, err := protocol.EncodePacket(pktBuf, protocol.PacketHeader{Seq: 0, Msgtype: protocol.MsgTypeStatus}, payload)
+	if err != nil {
+		return
+	}
+	conn.WriteToUDP(pktBuf[:n], addr)
 }
 
 func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
@@ -70,7 +93,9 @@ func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
 }
 
 func main() {
+	var aiBusy atomic.Bool
 	api := os.Getenv("GEMINI_API_KEY")
+
 	if api == "" {
 		log.Fatal("Empty API key")
 	}
@@ -86,7 +111,7 @@ func main() {
 	defer conn.Close()
 
 	fmt.Printf("UDP server listening on 8000: \n")
-	utterances := make(chan utteranceJob, 2)
+	utterances := make(chan utteranceJob, 1)
 
 	llm, err := ai.NewGeminiClient(context.Background(), api)
 	if err != nil {
@@ -102,11 +127,12 @@ func main() {
 	}
 	pipeline := ai.NewPipeline(stt, llm, tts)
 
-	go aiWorker(conn, pipeline, utterances)
+	go aiWorker(&aiBusy, conn, pipeline, utterances)
 
 	var speechBuf []byte
 	recording := false
 	silenceCount := 0
+	loudPackets := 0
 
 	for {
 		bufPtr := syncpool.Get().(*[]byte)
@@ -122,7 +148,15 @@ func main() {
 			syncpool.Put(bufPtr)
 			continue
 		} else {
-			fmt.Printf("%s, %d, %d ,%d \n", Addr, header.Seq, header.Msgtype, header.Length)
+			// fmt.Printf("%s, %d, %d ,%d \n", Addr, header.Seq, header.Msgtype, header.Length) // Uncomment for debug to check if packets are being received..
+		}
+
+		if aiBusy.Load() {
+			syncpool.Put(bufPtr)
+			speechBuf = speechBuf[:0]
+			recording = false
+			silenceCount = 0
+			continue
 		}
 
 		if header.Msgtype == protocol.MsgTypeMic {
@@ -130,7 +164,8 @@ func main() {
 			if header.Seq%31 == 0 {
 				fmt.Printf("RX from %s seq=%d rms=%.1f\n", Addr, header.Seq, rms)
 			}
-			if rms > 2000 { // Change this line according to your room average rms peak, check first by testing mic.
+			if rms > 1500 { // Change this value according to your room average rms peak, check first by testing mic.
+				loudPackets++
 				recording = true
 				silenceCount = 0
 			} else if recording {
@@ -144,11 +179,11 @@ func main() {
 
 		syncpool.Put(bufPtr)
 
-		if (recording && silenceCount >= 22) || (header.Msgtype == protocol.MsgTypeStop && len(speechBuf) > 0) || len(speechBuf) > 16000*2*15 {
+		if (recording && silenceCount >= 22 && len(speechBuf) >= 1600 && loudPackets < 4) || (header.Msgtype == protocol.MsgTypeStop && len(speechBuf) > 0) || len(speechBuf) > 16000*2*15 {
 			pcmCopy := append([]byte(nil), speechBuf...)
 			select {
 			case utterances <- utteranceJob{pcm: pcmCopy, addr: Addr}:
-
+				aiBusy.Store(true)
 			default:
 				log.Print("AI busy, dropping utterances...")
 			}
@@ -156,6 +191,7 @@ func main() {
 			speechBuf = speechBuf[:0]
 			recording = false
 			silenceCount = 0
+			loudPackets = 0
 		}
 	}
 }
