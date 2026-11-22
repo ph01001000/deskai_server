@@ -25,7 +25,7 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, wavData []byte) (string, err
 			},
 		},
 		{
-			Text: "Transcribe this audio verbatim. Output ONLY the plain transcription text, nothing else.",
+			Text: "Transcribe the spoken words verbatim. If there is only silence or background noise with no clear human speech, return an empty string. Never output timestamps like 0:00.",
 		},
 	}
 

@@ -15,6 +15,7 @@ const MsgTypeStatus = 4
 const StateListening = 0
 const StateThinking = 1
 const StateSpeaking = 2
+const StateIdle = 3
 
 type PacketHeader struct {
 	Seq     uint32

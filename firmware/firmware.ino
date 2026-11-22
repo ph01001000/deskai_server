@@ -10,9 +10,9 @@
 #include "protocol.h"
 
 // ---- FILL THESE IN ----
-const char* WIFI_SSID = "PH01";
-const char* WIFI_PASS = "boomboom";
-const char* SERVER_IP = "10.155.162.197";
+const char* WIFI_SSID = "YOUR_2.4GHZ_WIFI";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+const char* SERVER_IP = "YOUR_SERVER_LOCAL_IP";
 
 static const uint16_t SERVER_PORT      = 8000;
 static const uint16_t LOCAL_UDP_PORT   = 8001;
@@ -24,6 +24,7 @@ static const uint8_t  MSG_TYPE_STATUS  = 4;
 static const uint8_t  STATE_LISTENING  = 0;
 static const uint8_t  STATE_THINKING   = 1;
 static const uint8_t  STATE_SPEAKING   = 2;
+static const uint8_t  STATE_IDLE       = 3;
 
 // Exact pins from your wiring diagram
 #define MIC_SCK   33
@@ -42,9 +43,8 @@ static const uint32_t AMP_SAMPLE_RATE   = 24000;
 static const size_t   MIC_SAMPLES       = 512;
 static const size_t   RINGBUF_BYTES     = 65536; // ~1.36 s jitter buffer @ 24 kHz
 static const size_t   PREBUF_WATERMARK  = 12288; // ~256 ms pre-buffer before playing
-static const float    PLAYBACK_GAIN     = 0.60f;
+static const float    PLAYBACK_GAIN     = 0.80f; // Crisp desk volume (drop to 0.45f if USB browns out)
 
-// 0.96" SSD1306 128x64 I2C OLED
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 static i2s_chan_handle_t rx_handle      = NULL;
@@ -59,8 +59,8 @@ static volatile uint32_t lastSpeakEndMs = 0;
 
 // Thread-safe UI state shared between NetRxTask, AmpTask, and OledTask
 static portMUX_TYPE     uiMux           = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint8_t uiState         = STATE_LISTENING;
-static volatile bool    pendingListen   = false;
+static volatile uint8_t uiState         = STATE_IDLE;
+static volatile bool    pendingIdle     = false;
 static char             uiText[512]     = "";
 static volatile bool    uiTextChanged   = false;
 
@@ -93,7 +93,7 @@ bool initAmpI2S() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num  = 8;
     chan_cfg.dma_frame_num = 256;
-    chan_cfg.auto_clear    = true; // Zero-fills DMA on underrun: eliminates tail buzz!
+    chan_cfg.auto_clear    = true;
 
     if (i2s_new_channel(&chan_cfg, &tx_handle, NULL) != ESP_OK) return false;
 
@@ -125,7 +125,7 @@ void flushSilence() {
 
 void playReadyChirp() {
     static int16_t buf[512];
-    for (int c = 0; c < 14; c++) {
+    for (int c = 0; c < 12; c++) {
         for (size_t i = 0; i < 256; i++) {
             float t = (float)(c * 256 + i) / (float)AMP_SAMPLE_RATE;
             int16_t s = (int16_t)(2000.0f * sinf(2.0f * PI * 660.0f * t));
@@ -213,12 +213,11 @@ void netRxTask(void *param) {
             if (textLen >= sizeof(uiText)) textLen = sizeof(uiText) - 1;
 
             portENTER_CRITICAL(&uiMux);
-            if (newState == STATE_LISTENING && isSpeaking) {
-                // Keep showing reply text until AmpTask finishes draining the speaker buffer
-                pendingListen = true;
+            if (newState == STATE_IDLE && isSpeaking) {
+                pendingIdle = true;
             } else {
                 uiState = newState;
-                pendingListen = false;
+                pendingIdle = false;
                 if (newState == STATE_SPEAKING && textLen > 0) {
                     memcpy(uiText, raw + 1, textLen);
                     uiText[textLen] = '\0';
@@ -236,7 +235,7 @@ void ampTask(void *param) {
     uint32_t firstByteTime = 0;
 
     playReadyChirp();
-    Serial.println("[AmpTask] Speaker ready (24 kHz stereo-dup + auto_clear).");
+    Serial.println("[AmpTask] Speaker ready.");
 
     while (true) {
         if (!playing) {
@@ -282,17 +281,17 @@ void ampTask(void *param) {
             firstByteTime = 0;
 
             portENTER_CRITICAL(&uiMux);
-            if (pendingListen || uiState == STATE_SPEAKING) {
-                uiState = STATE_LISTENING;
-                pendingListen = false;
+            if (pendingIdle || uiState == STATE_SPEAKING) {
+                uiState = STATE_IDLE;
+                pendingIdle = false;
             }
             portEXIT_CRITICAL(&uiMux);
         }
     }
 }
 
-void drawWrappedText(const char *txt, int startLine, int yTop, int maxLines) {
-    u8g2.setFont(u8g2_font_5x8_tf);
+int renderWrappedText(const char *txt, int startLine, int yTop, int maxLines, bool draw) {
+    if (draw) u8g2.setFont(u8g2_font_5x8_tf);
     const int maxChars = 25;
     int len = strlen(txt);
     int idx = 0;
@@ -300,7 +299,7 @@ void drawWrappedText(const char *txt, int startLine, int yTop, int maxLines) {
     int drawn = 0;
     char lineBuf[28];
 
-    while (idx < len && drawn < maxLines) {
+    while (idx < len) {
         while (idx < len && txt[idx] == ' ') idx++;
         if (idx >= len) break;
 
@@ -312,23 +311,51 @@ void drawWrappedText(const char *txt, int startLine, int yTop, int maxLines) {
             if (split > 0) take = split;
         }
 
-        memcpy(lineBuf, txt + idx, take);
-        lineBuf[take] = '\0';
-
-        if (lineNum >= startLine) {
+        if (draw && lineNum >= startLine && drawn < maxLines) {
+            memcpy(lineBuf, txt + idx, take);
+            lineBuf[take] = '\0';
             u8g2.drawStr(2, yTop + (drawn * 11), lineBuf);
             drawn++;
         }
         lineNum++;
         idx += take;
     }
+    return lineNum;
+}
+
+void drawMochiEyes(int xOffset, int yOffset, int eyeW, int eyeH, int radius, bool happyCurve) {
+    int lx = 26 + xOffset;
+    int rx = 74 + xOffset;
+    int ey = 16 + yOffset;
+
+    if (happyCurve) {
+        // Cute "^ ^" happy arch eyes
+        u8g2.drawDisc(lx + eyeW / 2, ey + eyeH / 2 + 4, eyeW / 2);
+        u8g2.drawDisc(rx + eyeW / 2, ey + eyeH / 2 + 4, eyeW / 2);
+        u8g2.setDrawColor(0);
+        u8g2.drawBox(lx - 2, ey + eyeH / 2 + 4, eyeW + 4, eyeW);
+        u8g2.drawBox(rx - 2, ey + eyeH / 2 + 4, eyeW + 4, eyeW);
+        u8g2.drawDisc(lx + eyeW / 2, ey + eyeH / 2 + 7, eyeW / 2 - 4);
+        u8g2.drawDisc(rx + eyeW / 2, ey + eyeH / 2 + 7, eyeW / 2 - 4);
+        u8g2.setDrawColor(1);
+    } else {
+        u8g2.drawRBox(lx, ey, eyeW, eyeH, radius);
+        u8g2.drawRBox(rx, ey, eyeW, eyeH, radius);
+    }
 }
 
 void oledTask(void *param) {
     uint32_t lastBlinkMs = millis();
     bool blinking = false;
+
+    uint32_t nextMoodMs = millis() + 2500;
+    int targetX = 0, targetY = 0;
+    int curX = 0, curY = 0;
+    bool happyMood = false;
+
     uint32_t speakStartMs = millis();
     char localText[512] = "";
+    int totalLines = 0;
 
     while (true) {
         uint8_t state;
@@ -344,34 +371,66 @@ void oledTask(void *param) {
         }
         portEXIT_CRITICAL(&uiMux);
 
-        if (textUpdated) speakStartMs = millis();
+        if (textUpdated) {
+            speakStartMs = millis();
+            totalLines = renderWrappedText(localText, 0, 0, 0, false);
+        }
 
         u8g2.clearBuffer();
+        u8g2.setDrawColor(1);
 
-        if (state == STATE_LISTENING) {
+        if (state == STATE_IDLE) {
             uint32_t now = millis();
-            if (!blinking && (now - lastBlinkMs > 3400)) {
+
+            // Natural random glance & mood timer
+            if (now > nextMoodMs) {
+                int r = random(0, 10);
+                if (r < 2) { // 20% chance happy squint
+                    happyMood = true;
+                    targetX = 0;
+                    targetY = 0;
+                    nextMoodMs = now + 1500;
+                } else {
+                    happyMood = false;
+                    int xChoices[5] = {-10, -6, 0, 6, 10};
+                    int yChoices[3] = {-4, 0, 4};
+                    targetX = xChoices[random(0, 5)];
+                    targetY = yChoices[random(0, 3)];
+                    nextMoodMs = now + random(1600, 3800);
+                }
+            }
+
+            // Smooth easing towards target look position
+            if (curX < targetX) curX += 2;
+            else if (curX > targetX) curX -= 2;
+            if (curY < targetY) curY += 1;
+            else if (curY > targetY) curY -= 1;
+
+            // Natural blink
+            if (!blinking && (now - lastBlinkMs > (uint32_t)random(2600, 5200))) {
                 blinking = true;
                 lastBlinkMs = now;
-            } else if (blinking && (now - lastBlinkMs > 140)) {
+            } else if (blinking && (now - lastBlinkMs > 120)) {
                 blinking = false;
                 lastBlinkMs = now;
             }
 
             if (blinking) {
-                u8g2.drawRBox(28, 25, 26, 4, 2);
-                u8g2.drawRBox(74, 25, 26, 4, 2);
+                u8g2.drawRBox(26 + curX, 30 + curY, 28, 4, 2);
+                u8g2.drawRBox(74 + curX, 30 + curY, 28, 4, 2);
             } else {
-                u8g2.drawRBox(28, 12, 26, 30, 6);
-                u8g2.drawRBox(74, 12, 26, 30, 6);
+                drawMochiEyes(curX, curY, 28, 32, 8, happyMood);
             }
+
+        } else if (state == STATE_LISTENING) {
+            // Wide perked-up eyes + LISTENING label
+            drawMochiEyes(0, -6, 28, 34, 8, false);
             u8g2.setFont(u8g2_font_6x10_tf);
-            u8g2.drawStr(37, 60, "LISTENING");
+            u8g2.drawStr(37, 61, "LISTENING");
 
         } else if (state == STATE_THINKING) {
-            int shift = ((millis() / 450) % 2 == 0) ? 3 : -3;
-            u8g2.drawRBox(28 + shift, 18, 26, 16, 4);
-            u8g2.drawRBox(74 + shift, 18, 26, 16, 4);
+            int shift = ((millis() / 400) % 2 == 0) ? 4 : -4;
+            drawMochiEyes(shift, 4, 28, 16, 4, false);
 
             int dots = (millis() / 350) % 4;
             char label[16] = "THINKING";
@@ -380,30 +439,29 @@ void oledTask(void *param) {
             u8g2.drawStr(35, 58, label);
 
         } else { // STATE_SPEAKING
-            int bounce = ((millis() / 180) % 2 == 0) ? 0 : 2;
+            int bounce = ((millis() / 160) % 2 == 0) ? 0 : 2;
             u8g2.drawRBox(36, 3 + bounce, 18, 12 - bounce, 3);
             u8g2.drawRBox(74, 3 + bounce, 18, 12 - bounce, 3);
             u8g2.drawHLine(0, 18, 128);
 
-            int totalChars = strlen(localText);
-            int estLines = (totalChars + 24) / 25;
-            int maxOffset = (estLines > 4) ? (estLines - 4) : 0;
+            int maxOffset = (totalLines > 4) ? (totalLines - 4) : 0;
             int offset = 0;
             if (maxOffset > 0) {
-                offset = ((millis() - speakStartMs) / 1600) % (maxOffset + 1);
+                offset = ((millis() - speakStartMs) / 1500) % (maxOffset + 1);
             }
-            drawWrappedText(localText, offset, 29, 4);
+            renderWrappedText(localText, offset, 29, 4, true);
         }
 
         u8g2.sendBuffer();
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(45));
     }
 }
 
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.printf("\n=== DeskAI Voice + OLED Node (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+    randomSeed(esp_random());
+    Serial.printf("\n=== DeskAI Dasai Mochi Node (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
 
     Wire.begin(OLED_SDA, OLED_SCL);
     Wire.setClock(400000);

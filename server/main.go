@@ -37,7 +37,7 @@ func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utt
 
 		if err != nil {
 			log.Print(err)
-			sendStatus(conn, job.addr, protocol.StateListening, "")
+			sendStatus(conn, job.addr, protocol.StateIdle, "")
 			aiBusy.Store(false)
 			continue
 		}
@@ -50,7 +50,7 @@ func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utt
 			sendTTS(conn, job.addr, synth)
 			time.Sleep(800 * time.Millisecond)
 		}
-		sendStatus(conn, job.addr, protocol.StateListening, "")
+		sendStatus(conn, job.addr, protocol.StateIdle, "")
 		aiBusy.Store(false)
 	}
 }
@@ -156,6 +156,7 @@ func main() {
 			speechBuf = speechBuf[:0]
 			recording = false
 			silenceCount = 0
+			loudPackets = 0
 			continue
 		}
 
@@ -168,6 +169,9 @@ func main() {
 				loudPackets++
 				recording = true
 				silenceCount = 0
+				if loudPackets == 2 {
+					sendStatus(conn, Addr, protocol.StateListening, "")
+				}
 			} else if recording {
 				silenceCount++
 			}
@@ -179,7 +183,7 @@ func main() {
 
 		syncpool.Put(bufPtr)
 
-		if (recording && silenceCount >= 22 && len(speechBuf) >= 1600 && loudPackets < 4) || (header.Msgtype == protocol.MsgTypeStop && len(speechBuf) > 0) || len(speechBuf) > 16000*2*15 {
+		if (recording && silenceCount >= 22 && len(speechBuf) >= 16000 && loudPackets >= 4) || (header.Msgtype == protocol.MsgTypeStop && len(speechBuf) > 0) || len(speechBuf) > 16000*2*15 {
 			pcmCopy := append([]byte(nil), speechBuf...)
 			select {
 			case utterances <- utteranceJob{pcm: pcmCopy, addr: Addr}:
@@ -192,6 +196,14 @@ func main() {
 			recording = false
 			silenceCount = 0
 			loudPackets = 0
+		} else if recording && silenceCount >= 22 {
+			if loudPackets >= 2 {
+				sendStatus(conn, Addr, protocol.StateIdle, "")
+			}
+			loudPackets = 0
+			silenceCount = 0
+			recording = false
+			speechBuf = speechBuf[:0]
 		}
 	}
 }
