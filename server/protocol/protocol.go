@@ -17,6 +17,14 @@ const StateThinking = 1
 const StateSpeaking = 2
 const StateIdle = 3
 
+const MoodNormal = 0
+const MoodAnnoyed = 1
+const MoodHappy = 2
+const MoodLaugh = 3
+const MoodAngry = 4
+const MoodSad = 5
+const MoodCool = 6
+
 type PacketHeader struct {
 	Seq     uint32
 	Magic   uint16
