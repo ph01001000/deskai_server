@@ -152,4 +152,3 @@ deskai/
     │   └── tts_piper.go      # Local Piper subprocess TTS
     └── cmd/mockmic/main.go   # Local WAV-over-UDP client simulator
 ```
-```
