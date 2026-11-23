@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -31,8 +32,8 @@ type utteranceJob struct {
 func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utterances <-chan utteranceJob) {
 	for job := range utterances {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		mood, reply, synth, err := pipeline.ProcessUtterance(ctx, job.pcm)
 		sendStatus(conn, job.addr, protocol.StateThinking, protocol.MoodNormal, "")
+		mood, reply, synth, err := pipeline.ProcessUtterance(ctx, job.pcm)
 		cancel()
 
 		if err != nil {
@@ -62,7 +63,7 @@ func sendStatus(conn *net.UDPConn, addr *net.UDPAddr, state, mood uint8, text st
 	payload := make([]byte, 2+len(text))
 	payload[0] = state
 	payload[1] = mood
-	copy(payload[1:], text)
+
 	copy(payload[2:], text)
 	pktBuf := make([]byte, protocol.HeaderSize+len(payload))
 	n, err := protocol.EncodePacket(pktBuf, protocol.PacketHeader{Seq: 0, Msgtype: protocol.MsgTypeStatus}, payload)
@@ -73,6 +74,8 @@ func sendStatus(conn *net.UDPConn, addr *net.UDPAddr, state, mood uint8, text st
 }
 
 func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
+	sendAudioConfig(conn, addr, 24000)
+	time.Sleep(5 * time.Millisecond)
 	pktBuf := make([]byte, protocol.HeaderSize+protocol.MaxSamples*2)
 	var seq uint32 = 1
 	for i := 0; i < len(pcm); i += protocol.MaxSamples * 2 {
@@ -94,13 +97,25 @@ func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
 
 }
 
+func sendAudioConfig(conn *net.UDPConn, addr *net.UDPAddr, sampleRate uint32) {
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, sampleRate)
+	pktBuf := make([]byte, protocol.HeaderSize+len(payload))
+	n, err := protocol.EncodePacket(pktBuf, protocol.PacketHeader{Seq: 0, Msgtype: protocol.MsgTypeAudioConfig}, payload)
+	if err != nil {
+		return
+	}
+	conn.WriteToUDP(pktBuf[:n], addr)
+}
+
 func main() {
 	var aiBusy atomic.Bool
-	api := os.Getenv("GEMINI_API_KEY")
 
-	if api == "" {
-		log.Fatal("Empty API key")
+	if err := ensureEnv(); err != nil {
+		log.Fatalf("Setup failed: %v", err)
 	}
+
+	api := os.Getenv("GEMINI_API_KEY")
 	addr := &net.UDPAddr{
 		Port: 8000,
 		IP:   net.ParseIP("0.0.0.0"),
@@ -135,6 +150,8 @@ func main() {
 	recording := false
 	silenceCount := 0
 	loudPackets := 0
+	const maxPreRoll = 4 * 1024
+	var preRoll []byte
 
 	for {
 		bufPtr := syncpool.Get().(*[]byte)
@@ -159,6 +176,7 @@ func main() {
 			recording = false
 			silenceCount = 0
 			loudPackets = 0
+			preRoll = preRoll[:0]
 			continue
 		}
 
@@ -167,9 +185,16 @@ func main() {
 			if header.Seq%31 == 0 {
 				fmt.Printf("RX from %s seq=%d rms=%.1f\n", Addr, header.Seq, rms)
 			}
+			if len(preRoll) > maxPreRoll {
+				preRoll = preRoll[len(preRoll)-maxPreRoll:]
+			}
 			if rms > 1500 { // Change this value according to your room average rms peak, check first by testing mic.
+				if !recording {
+					speechBuf = append(speechBuf, preRoll...)
+					preRoll = preRoll[:0]
+					recording = true
+				}
 				loudPackets++
-				recording = true
 				silenceCount = 0
 				if loudPackets == 2 {
 					sendStatus(conn, Addr, protocol.StateListening, protocol.MoodNormal, "")
@@ -179,6 +204,8 @@ func main() {
 			}
 			if recording {
 				speechBuf = append(speechBuf, payload...)
+			} else {
+				preRoll = append(preRoll, payload...)
 			}
 
 		}
@@ -206,6 +233,7 @@ func main() {
 			silenceCount = 0
 			recording = false
 			speechBuf = speechBuf[:0]
+			preRoll = preRoll[:0]
 		}
 	}
 }

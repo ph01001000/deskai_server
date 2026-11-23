@@ -12,33 +12,31 @@
 #include "secrets.h"
 
 // =========================================================
-// BOT LOOK & PERSONALITY TUNING (Edit these to style your bot!)
+// FLUXGARAGE-STYLE SHARP ROBOEYES TUNING
 // =========================================================
-static const int      EYE_WIDTH         = 32;    // Eye width in px (try 22..38)
-static const int      EYE_HEIGHT        = 24;    // Eye height in px (try 16..30)
-static const int      EYE_SPACING       = 18;    // Gap between eyes in px (try 10..26)
-static const int      EYE_RADIUS        = 6;     // Corner roundness: 1=sharp cyber, 6=soft, 12=cute round
-static const int      EYE_CENTER_Y      = 24;    // Vertical eye center (lower number = higher up)
-static const float    EYE_SMOOTHNESS    = 0.24f; // Morph speed: 0.12=dreamy, 0.24=smooth, 0.45=snappy
-static const int      LOOK_RANGE_X      = 11;    // How far left/right eyes glance when idle (px)
-static const int      LOOK_RANGE_Y      = 4;     // How far up/down eyes glance when idle (px)
-static const float    CURIOSITY_SCALE   = 2.5f;  // 3D depth stretch on side glances (0=flat, 4=strong)
-static const bool     ENABLE_MOUTH      = false; // true = minimal talking bar below eyes, false = pure eyes
-static const bool     INVERT_DISPLAY    = false; // true = black eyes on glowing white screen
-static const uint32_t BLINK_MIN_MS      = 2400;  // Min time between blinks (ms)
-static const uint32_t BLINK_MAX_MS      = 5200;  // Max time between blinks (ms)
-static const uint32_t TIRED_AFTER_MS    = 25000; // Start getting sleepy after 25s idle
-static const uint32_t SLEEP_AFTER_MS    = 45000; // Fall asleep after 45s idle
-static const uint32_t CAPTION_MS        = 1300;  // How long each 1-line caption stays visible (ms)
-static const float    PLAYBACK_GAIN     = 0.55f; // Speaker volume 0.10..1.00 (lower if USB browns out)
+static const int      BASE_EYE_W        = 28;    // Matches your sketch: 28px
+static const int      BASE_EYE_H        = 20;    // Matches your sketch: 20px
+static const int      EYE_RADIUS        = 2;     // Crisp sharp corners (2px radius)
+static const int      EYE_SPACING       = 14;    // Gap between eye inner edges
+static const int      EYE_CENTER_Y      = 28;    // Vertical eye center
+static const float    EYE_SMOOTHNESS    = 0.32f; // Snappy half-step kinetic easing
+static const int      LOOK_RANGE_X      = 16;    // Cardinal glance range X
+static const int      LOOK_RANGE_Y      = 6;     // Cardinal glance range Y
+static const int      CURIOSITY_GROWTH  = 8;     // FluxGarage curiosity: +8px outer eye!
+static const uint32_t BLINK_MIN_MS      = 2500;  // 3s +- 1s
+static const uint32_t BLINK_MAX_MS      = 4500;  
+static const uint32_t SLEEP_AFTER_MS    = 45000; 
+static const uint32_t CAPTION_MS        = 1300;  
+static const float    PLAYBACK_GAIN     = 0.55f; 
 // =========================================================
 
-static const uint16_t SERVER_PORT      = 8000;
-static const uint16_t LOCAL_UDP_PORT   = 8001;
-static const uint16_t PROTOCOL_MAGIC   = 0xAE05;
-static const uint8_t  MSG_TYPE_MIC     = 1;
-static const uint8_t  MSG_TYPE_TTS     = 2;
-static const uint8_t  MSG_TYPE_STATUS  = 4;
+static const uint16_t SERVER_PORT           = 8000;
+static const uint16_t LOCAL_UDP_PORT        = 8001;
+static const uint16_t PROTOCOL_MAGIC        = 0xAE05;
+static const uint8_t  MSG_TYPE_MIC          = 1;
+static const uint8_t  MSG_TYPE_TTS          = 2;
+static const uint8_t  MSG_TYPE_STATUS       = 4;
+static const uint8_t  MSG_TYPE_AUDIO_CONFIG = 5;
 
 static const uint8_t  STATE_LISTENING  = 0;
 static const uint8_t  STATE_THINKING   = 1;
@@ -72,8 +70,8 @@ static const uint8_t  MOOD_COOL        = 6;
 static const uint32_t MIC_SAMPLE_RATE   = 16000;
 static const uint32_t AMP_SAMPLE_RATE   = 24000;
 static const size_t   MIC_SAMPLES       = 512;
-static const size_t   RINGBUF_BYTES     = 32768; // ~680 ms jitter buffer @ 24 kHz (low DRAM footprint)
-static const size_t   PREBUF_WATERMARK  = 10240; // ~213 ms pre-buffer before playing
+static const size_t   RINGBUF_BYTES     = 32768;
+static const size_t   PREBUF_WATERMARK  = 10240;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -88,20 +86,19 @@ static volatile bool     isSpeaking     = false;
 static volatile uint32_t lastSpeakEndMs = 0;
 static volatile uint8_t  micLevel       = 0;
 
-static portMUX_TYPE     uiMux           = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint8_t uiState         = STATE_IDLE;
-static volatile uint8_t uiMood          = MOOD_NORMAL;
-static volatile bool    pendingIdle     = false;
-static char             uiText[512]     = "";
-static volatile bool    uiTextChanged   = false;
+static portMUX_TYPE      uiMux          = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint8_t  uiState        = STATE_IDLE;
+static volatile uint8_t  uiMood         = MOOD_NORMAL;
+static volatile bool     pendingIdle    = false;
+static char              uiText[512]    = "";
+static volatile bool     uiTextChanged  = false;
+static uint32_t          currentAmpRate = AMP_SAMPLE_RATE;
 
-struct EyeRig {
+struct RoboEyeRig {
     float gazeX;
     float gazeY;
-    float hL;
-    float hR;
-    float topL;
-    float topR;
+    float hL, hR;
+    float topL, topR;
     float tiltTop;
     float botCurve;
 };
@@ -127,9 +124,6 @@ bool initMicI2S() {
     std_cfg.gpio_cfg.ws   = (gpio_num_t)MIC_WS;
     std_cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
     std_cfg.gpio_cfg.din  = (gpio_num_t)MIC_SD;
-    std_cfg.gpio_cfg.invert_flags.mclk_inv = false;
-    std_cfg.gpio_cfg.invert_flags.bclk_inv = false;
-    std_cfg.gpio_cfg.invert_flags.ws_inv   = false;
 
     if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) return false;
     return i2s_channel_enable(rx_handle) == ESP_OK;
@@ -153,28 +147,41 @@ bool initAmpI2S() {
     std_cfg.gpio_cfg.ws   = (gpio_num_t)AMP_LRC;
     std_cfg.gpio_cfg.dout = (gpio_num_t)AMP_DOUT;
     std_cfg.gpio_cfg.din  = I2S_GPIO_UNUSED;
-    std_cfg.gpio_cfg.invert_flags.mclk_inv = false;
-    std_cfg.gpio_cfg.invert_flags.bclk_inv = false;
-    std_cfg.gpio_cfg.invert_flags.ws_inv   = false;
 
     if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) return false;
     return i2s_channel_enable(tx_handle) == ESP_OK;
 }
 
+bool setAmpSampleRate(uint32_t newRate) {
+    if (newRate == 0 || newRate == currentAmpRate) return true;
+    Serial.printf("[I2S] Switching Amp Clock: %u Hz -> %u Hz\n", currentAmpRate, newRate);
+
+    i2s_channel_disable(tx_handle);
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(newRate);
+    esp_err_t err = i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+    i2s_channel_enable(tx_handle);
+
+    if (err == ESP_OK) {
+        currentAmpRate = newRate;
+        return true;
+    }
+    return false;
+}
+
 void flushSilence() {
     static int16_t zeros[512] = {0};
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         size_t written = 0;
-        i2s_channel_write(tx_handle, zeros, sizeof(zeros), &written, pdMS_TO_TICKS(50));
+        i2s_channel_write(tx_handle, zeros, sizeof(zeros), &written, pdMS_TO_TICKS(20));
     }
 }
 
 void playReadyChirp() {
     static int16_t buf[512];
-    for (int c = 0; c < 10; c++) {
+    for (int c = 0; c < 6; c++) {
         for (size_t i = 0; i < 256; i++) {
             float t = (float)(c * 256 + i) / (float)AMP_SAMPLE_RATE;
-            int16_t s = (int16_t)(1600.0f * sinf(2.0f * PI * 660.0f * t));
+            int16_t s = (int16_t)(1600.0f * sinf(2.0f * PI * 880.0f * t));
             buf[i * 2]     = s;
             buf[i * 2 + 1] = s;
         }
@@ -185,6 +192,11 @@ void playReadyChirp() {
 }
 
 bool initUDPSocket() {
+    if (udpSock >= 0) {
+        close(udpSock);
+        udpSock = -1;
+    }
+
     udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (udpSock < 0) return false;
 
@@ -239,23 +251,44 @@ void micTask(void *param) {
         txPkt.header.length = MIC_SAMPLES * sizeof(int16_t);
         txPkt.header.type   = MSG_TYPE_MIC;
 
-        sendto(udpSock, &txPkt, sizeof(AudioPacket), 0,
-               (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+        if (udpSock >= 0) {
+            sendto(udpSock, &txPkt, sizeof(AudioPacket), 0,
+                   (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+        }
     }
 }
 
 void netRxTask(void *param) {
     static AudioPacket rxPkt;
+    uint32_t expectedSeq = 0;
 
     while (true) {
+        if (udpSock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         int n = recvfrom(udpSock, &rxPkt, sizeof(rxPkt), 0, NULL, NULL);
         if (n < (int)sizeof(PacketHeader)) continue;
         if (rxPkt.header.magic != PROTOCOL_MAGIC) continue;
         if (rxPkt.header.length == 0 || rxPkt.header.length > 1024) continue;
         if (n < (int)(sizeof(PacketHeader) + rxPkt.header.length)) continue;
 
+        if (rxPkt.header.type == MSG_TYPE_AUDIO_CONFIG && rxPkt.header.length >= 4) {
+            uint32_t newRate = *(uint32_t *)rxPkt.samples;
+            setAmpSampleRate(newRate);
+            expectedSeq = 0;
+            continue;
+        }
+
         if (rxPkt.header.type == MSG_TYPE_TTS) {
-            xRingbufferSend(audioRingBuf, rxPkt.samples, rxPkt.header.length, 0);
+            uint32_t seq = rxPkt.header.seq;
+            if (seq == 1 || expectedSeq == 0) expectedSeq = 1;
+
+            if (seq >= expectedSeq) {
+                expectedSeq = seq + 1;
+                xRingbufferSend(audioRingBuf, rxPkt.samples, rxPkt.header.length, 0);
+            }
         } else if (rxPkt.header.type == MSG_TYPE_STATUS) {
             const uint8_t *raw = (const uint8_t *)rxPkt.samples;
             uint8_t newState = raw[0];
@@ -277,8 +310,6 @@ void netRxTask(void *param) {
                 }
             }
             portEXIT_CRITICAL(&uiMux);
-
-            Serial.printf("[UI] state=%u mood=%u textLen=%u\n", newState, newMood, (unsigned)textLen);
         }
     }
 }
@@ -288,9 +319,8 @@ void ampTask(void *param) {
     bool playing = false;
     uint32_t firstByteTime = 0;
 
-    vTaskDelay(pdMS_TO_TICKS(300)); // Let Wi-Fi settle before startup chirp
+    vTaskDelay(pdMS_TO_TICKS(500));
     playReadyChirp();
-    Serial.println("[AmpTask] Speaker ready.");
 
     while (true) {
         if (!playing) {
@@ -345,8 +375,50 @@ void ampTask(void *param) {
     }
 }
 
+// ---------------------------------------------------------
+// FLUXGARAGE SHARP SQUARE-EYE DRAWING ROUTINE
+// ---------------------------------------------------------
+
+void drawSquareEye(int cx, int cy, int w, int h, float topCut, float tiltTop, float botCurve, bool isLeft, bool blinking) {
+    if (blinking) {
+        // Fast, clean horizontal blink line
+        display.fillRoundRect(cx - w / 2, cy - 1, w, 2, 1, SSD1306_WHITE);
+        return;
+    }
+
+    if (h < 3) h = 3;
+    int x = cx - w / 2;
+    int y = cy - h / 2;
+
+    // Solid, sharp square-like eye with radius 2 (Exact FluxGarage RoboEyes look!)
+    display.fillRoundRect(x, y, w, h, EYE_RADIUS, SSD1306_WHITE);
+
+    // Eyelid top cutoff (for tired/annoyed)
+    int tc = (int)roundf(topCut);
+    if (tc > 0) {
+        display.fillRect(x - 1, y - 1, w + 2, tc + 1, SSD1306_BLACK);
+    }
+
+    // Tilt brow cuts (for angry / cool)
+    int tt = (int)roundf(tiltTop);
+    if (tt > 0) {
+        if (isLeft) display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x + w + 1, y + tt, SSD1306_BLACK);
+        else display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x - 1, y + tt, SSD1306_BLACK);
+    } else if (tt < 0) {
+        int d = -tt;
+        if (isLeft) display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x - 1, y + d, SSD1306_BLACK);
+        else display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x + w + 1, y + d, SSD1306_BLACK);
+    }
+
+    // Bottom cutout (for happy smile / laugh arcs)
+    int bc = (int)roundf(botCurve);
+    if (bc > 0) {
+        display.fillRoundRect(x - 1, y + h - bc, w + 2, bc + 2, EYE_RADIUS, SSD1306_BLACK);
+    }
+}
+
 int singleLineCaption(const char *txt, int targetLine, int yPos, bool draw) {
-    const int maxChars = 21;
+    const int maxChars = 20;
     int len = strlen(txt);
     int idx = 0;
     int lineNum = 0;
@@ -368,7 +440,7 @@ int singleLineCaption(const char *txt, int targetLine, int yPos, bool draw) {
             memcpy(lineBuf, txt + idx, take);
             lineBuf[take] = '\0';
             int xStart = (128 - take * 6) / 2;
-            if (xStart < 1) xStart = 1;
+            if (xStart < 4) xStart = 4;
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             display.setTextWrap(false);
@@ -381,55 +453,14 @@ int singleLineCaption(const char *txt, int targetLine, int yPos, bool draw) {
     return lineNum;
 }
 
-void drawOneEye(int cx, int cy, int w, int h, float topCut, float tiltTop, float botCurve, bool isLeft) {
-    if (h < 3) h = 3;
-    int r = EYE_RADIUS;
-    if (r > h / 2) r = h / 2;
-    if (r > w / 2) r = w / 2;
-
-    int x = cx - w / 2;
-    int y = cy - h / 2;
-
-    display.fillRoundRect(x, y, w, h, r, SSD1306_WHITE);
-
-    int tc = (int)roundf(topCut);
-    if (tc > 0) {
-        display.fillRect(x - 1, y - 1, w + 2, tc + 1, SSD1306_BLACK);
-    }
-
-    int tt = (int)roundf(tiltTop);
-    if (tt > 0) {
-        if (isLeft) {
-            display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x + w + 1, y + tt, SSD1306_BLACK);
-        } else {
-            display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x - 1, y + tt, SSD1306_BLACK);
-        }
-    } else if (tt < 0) {
-        int d = -tt;
-        if (isLeft) {
-            display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x - 1, y + d, SSD1306_BLACK);
-        } else {
-            display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, x + w + 1, y + d, SSD1306_BLACK);
-        }
-    }
-
-    int bc = (int)roundf(botCurve);
-    if (bc > 0) {
-        int rad = (w * 3) / 4;
-        display.fillCircle(cx, (y + h) + rad - bc, rad, SSD1306_BLACK);
-    }
-}
-
 void oledTask(void *param) {
-    const float baseH = (float)EYE_HEIGHT;
-    EyeRig cur = {0, 0, baseH, baseH, 0, 0, 0, 0};
-    EyeRig tgt = {0, 0, baseH, baseH, 0, 0, 0, 0};
+    const float baseH = (float)BASE_EYE_H;
+    RoboEyeRig cur = {0, 0, baseH, baseH, 0, 0, 0, 0};
+    RoboEyeRig tgt = {0, 0, baseH, baseH, 0, 0, 0, 0};
 
-    uint32_t nextIdleLookMs = millis() + 2000;
-    float idleGazeX = 0, idleGazeY = 0;
-
-    uint32_t nextBlinkMs = millis() + BLINK_MIN_MS;
-    uint32_t blinkEndMs  = 0;
+    uint32_t nextIdleLookMs = millis() + 1000;
+    uint32_t nextBlinkMs    = millis() + BLINK_MIN_MS;
+    uint32_t blinkEndMs     = 0;
 
     uint32_t lastInteraction = millis();
     uint32_t speakStartMs    = millis();
@@ -440,6 +471,7 @@ void oledTask(void *param) {
     static char localText[512] = "";
     int   totalLines = 0;
     float smoothMic  = 0.0f;
+    bool  isDimmed   = false;
 
     while (true) {
         uint32_t now = millis();
@@ -467,17 +499,23 @@ void oledTask(void *param) {
         if (targetMic > smoothMic) smoothMic = smoothMic * 0.40f + targetMic * 0.60f;
         else smoothMic = smoothMic * 0.85f + targetMic * 0.15f;
 
-        if (state != STATE_IDLE) {
-            lastInteraction = now;
-        }
+        if (state != STATE_IDLE) lastInteraction = now;
         if (prevState == STATE_SPEAKING && state == STATE_IDLE && holdMood != MOOD_NORMAL) {
-            moodHoldUntil = now + 2200;
+            moodHoldUntil = now + 2400;
         }
         prevState = state;
 
         bool isSleeping = (state == STATE_IDLE && (now - lastInteraction > SLEEP_AFTER_MS));
+        if (isSleeping && !isDimmed) {
+            display.dim(true);
+            isDimmed = true;
+        } else if (!isSleeping && isDimmed) {
+            display.dim(false);
+            isDimmed = false;
+        }
+
         if (!isSleeping && now > nextBlinkMs) {
-            blinkEndMs  = now + 115;
+            blinkEndMs  = now + 90;
             nextBlinkMs = now + random(BLINK_MIN_MS, BLINK_MAX_MS);
         }
         bool blinking = (!isSleeping && now < blinkEndMs);
@@ -489,73 +527,111 @@ void oledTask(void *param) {
                                  : ((now < moodHoldUntil) ? holdMood : MOOD_NORMAL);
 
         if (state == STATE_LISTENING) {
-            tgt.gazeX    = sinf(now * 0.002f) * 2.5f;
-            tgt.gazeY    = -2.0f;
-            float openH  = baseH + (smoothMic * 0.045f);
-            tgt.hL       = openH;
-            tgt.hR       = openH;
-            tgt.topL     = 0;
+            tgt.gazeX    = 0.0f;
+            tgt.gazeY    = -1.0f;
+            float openH  = baseH + (smoothMic * 0.05f);
+            tgt.hL = openH;
+            tgt.hR = openH;
+            tgt.topL = 0; tgt.topR = 0;
+            tgt.tiltTop = 0; tgt.botCurve = 0;
+
+        } else if (state == STATE_THINKING) {
+            // Curious upward glance (looking NE)
+            tgt.gazeX    = (float)LOOK_RANGE_X * 0.8f;
+            tgt.gazeY    = -(float)LOOK_RANGE_Y * 0.9f;
+            tgt.hL       = baseH * 0.80f;
+            tgt.hR       = baseH + (float)CURIOSITY_GROWTH; // Curiosity stretch!
+            tgt.topL     = baseH * 0.20f;
             tgt.topR     = 0;
             tgt.tiltTop  = 0;
             tgt.botCurve = 0;
 
-        } else if (state == STATE_THINKING) {
-            tgt.gazeX    = (float)LOOK_RANGE_X * 0.8f + sinf(now * 0.0025f) * 3.0f;
-            tgt.gazeY    = -6.0f;
-            tgt.hL       = baseH * 0.80f;
-            tgt.hR       = baseH * 1.05f;
-            tgt.topL     = baseH * 0.25f;
-            tgt.topR     = baseH * 0.05f;
-            tgt.tiltTop  = 0;
-            tgt.botCurve = 0;
-
         } else if (state == STATE_SPEAKING || now < moodHoldUntil) {
-            float talkPulse = (state == STATE_SPEAKING) ? (sinf(now * 0.020f) * 1.5f) : 0.0f;
+            float talkPulse = (state == STATE_SPEAKING) ? (sinf(now * 0.025f) * 2.2f) : 0.0f;
 
             switch (activeMood) {
-                case MOOD_ANNOYED:
-                    tgt = {8.0f, -1.0f, baseH * 0.92f, baseH * 0.92f, baseH * 0.44f, baseH * 0.44f, 0.0f, 0.0f};
-                    break;
                 case MOOD_HAPPY:
-                    tgt = {0.0f, -1.0f, baseH + talkPulse, baseH + talkPulse, 0.0f, 0.0f, 0.0f, baseH * 0.58f};
+                    tgt = {0.0f, -1.0f, baseH + talkPulse, baseH + talkPulse, 0.0f, 0.0f, 0.0f, baseH * 0.55f};
+                    bounceY = (int)(sinf(now * 0.022f) * 2.0f);
                     break;
                 case MOOD_LAUGH:
-                    tgt = {0.0f, -2.0f, baseH, baseH, 0.0f, 0.0f, 0.0f, baseH * 0.67f};
-                    bounceY = (int)(sinf(now * 0.035f) * 3.0f);
+                    tgt = {0.0f, -2.0f, baseH * 0.85f, baseH * 0.85f, 0.0f, 0.0f, 0.0f, baseH * 0.65f};
+                    bounceY = (int)(sinf(now * 0.038f) * 3.0f);
+                    break;
+                case MOOD_COOL:
+                    tgt = {6.0f, 0.0f, baseH * 0.80f, baseH + 3.0f, baseH * 0.35f, 0.0f, baseH * 0.15f, 0.0f};
+                    break;
+                case MOOD_ANNOYED:
+                    tgt = {7.0f, -1.0f, baseH * 0.85f, baseH * 0.85f, baseH * 0.45f, baseH * 0.30f, 0.0f, 0.0f};
                     break;
                 case MOOD_ANGRY:
-                    tgt = {0.0f, 1.0f, baseH * 0.96f, baseH * 0.96f, 1.0f, 1.0f, baseH * 0.56f, 0.0f};
+                    tgt = {0.0f, 1.0f, baseH * 0.95f, baseH * 0.95f, 1.0f, 1.0f, baseH * 0.55f, 0.0f};
                     shakeX = ((now / 55) % 2 == 0) ? 1 : -1;
                     break;
                 case MOOD_SAD:
-                    tgt = {0.0f, 4.0f, baseH * 0.96f, baseH * 0.96f, 1.0f, 1.0f, -baseH * 0.52f, 0.0f};
+                    tgt = {0.0f, 4.0f, baseH * 0.90f, baseH * 0.90f, 1.0f, 1.0f, -baseH * 0.45f, 0.0f};
                     break;
-                case MOOD_COOL:
-                    tgt = {5.0f, 0.0f, baseH * 0.96f, baseH * 0.96f, baseH * 0.40f, baseH * 0.25f, baseH * 0.08f, 0.0f};
-                    break;
-                default: // MOOD_NORMAL
+                default:
                     tgt = {0.0f, -1.0f, baseH + talkPulse, baseH + talkPulse, 0.0f, 0.0f, 0.0f, 0.0f};
                     break;
             }
 
         } else {
+            // IDLE: FluxGarage 9-Cardinal Direction Idle Mode + Curiosity Mode!
             uint32_t idleTime = now - lastInteraction;
             if (idleTime > SLEEP_AFTER_MS) {
-                tgt = {0.0f, 4.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                // Sleep line
+                tgt = {0.0f, 3.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f};
             } else {
                 if (now > nextIdleLookMs) {
-                    idleGazeX = (float)random(-LOOK_RANGE_X, LOOK_RANGE_X + 1);
-                    idleGazeY = (float)random(-LOOK_RANGE_Y, LOOK_RANGE_Y + 1);
-                    nextIdleLookMs = now + random(1500, 3800);
-                }
-                float curL = (idleGazeX < -3) ? CURIOSITY_SCALE : 0.0f;
-                float curR = (idleGazeX >  3) ? CURIOSITY_SCALE : 0.0f;
-                float tiredDrop = (idleTime > TIRED_AFTER_MS) ? (baseH * 0.38f) : 0.0f;
+                    // Pick one of the 9 FluxGarage cardinal positions!
+                    int pos = random(0, 9);
+                    switch (pos) {
+                        case 0: // Center
+                            tgt.gazeX = 0; tgt.gazeY = 0;
+                            tgt.hL = baseH; tgt.hR = baseH;
+                            break;
+                        case 1: // West (Look Left) -> Left eye grows +8px!
+                            tgt.gazeX = -LOOK_RANGE_X; tgt.gazeY = 0;
+                            tgt.hL = baseH + CURIOSITY_GROWTH; tgt.hR = baseH;
+                            break;
+                        case 2: // East (Look Right) -> Right eye grows +8px!
+                            tgt.gazeX = LOOK_RANGE_X; tgt.gazeY = 0;
+                            tgt.hL = baseH; tgt.hR = baseH + CURIOSITY_GROWTH;
+                            break;
+                        case 3: // North (Look Up)
+                            tgt.gazeX = 0; tgt.gazeY = -LOOK_RANGE_Y;
+                            tgt.hL = baseH; tgt.hR = baseH;
+                            break;
+                        case 4: // South (Look Down)
+                            tgt.gazeX = 0; tgt.gazeY = LOOK_RANGE_Y;
+                            tgt.hL = baseH; tgt.hR = baseH;
+                            break;
+                        case 5: // North-West (Up-Left) -> Left eye grows!
+                            tgt.gazeX = -LOOK_RANGE_X; tgt.gazeY = -LOOK_RANGE_Y;
+                            tgt.hL = baseH + CURIOSITY_GROWTH; tgt.hR = baseH;
+                            break;
+                        case 6: // North-East (Up-Right) -> Right eye grows!
+                            tgt.gazeX = LOOK_RANGE_X; tgt.gazeY = -LOOK_RANGE_Y;
+                            tgt.hL = baseH; tgt.hR = baseH + CURIOSITY_GROWTH;
+                            break;
+                        case 7: // South-West (Down-Left) -> Left eye grows!
+                            tgt.gazeX = -LOOK_RANGE_X; tgt.gazeY = LOOK_RANGE_Y;
+                            tgt.hL = baseH + CURIOSITY_GROWTH; tgt.hR = baseH;
+                            break;
+                        case 8: // South-East (Down-Right) -> Right eye grows!
+                            tgt.gazeX = LOOK_RANGE_X; tgt.gazeY = LOOK_RANGE_Y;
+                            tgt.hL = baseH; tgt.hR = baseH + CURIOSITY_GROWTH;
+                            break;
+                    }
 
-                tgt = {idleGazeX, idleGazeY, baseH + curL, baseH + curR, tiredDrop, tiredDrop, 0.0f, 0.0f};
+                    // setIdleMode(ON, 2, 2): random interval 1.5s - 3.2s
+                    nextIdleLookMs = now + random(1500, 3200);
+                }
             }
         }
 
+        // Kinetic half-step interpolation (RoboEyes smooth tweening)
         cur.gazeX    = lerpf(cur.gazeX,    tgt.gazeX,    EYE_SMOOTHNESS);
         cur.gazeY    = lerpf(cur.gazeY,    tgt.gazeY,    EYE_SMOOTHNESS);
         cur.hL       = lerpf(cur.hL,       tgt.hL,       EYE_SMOOTHNESS);
@@ -565,57 +641,48 @@ void oledTask(void *param) {
         cur.tiltTop  = lerpf(cur.tiltTop,  tgt.tiltTop,  EYE_SMOOTHNESS);
         cur.botCurve = lerpf(cur.botCurve, tgt.botCurve, EYE_SMOOTHNESS);
 
-        float drawHL = blinking ? 3.0f : cur.hL;
-        float drawHR = blinking ? 3.0f : cur.hR;
-        float drawTL = blinking ? 0.0f : cur.topL;
-        float drawTR = blinking ? 0.0f : cur.topR;
-        float drawTT = blinking ? 0.0f : cur.tiltTop;
-        float drawBC = blinking ? 0.0f : cur.botCurve;
-
         display.clearDisplay();
 
-        int halfSpan = (EYE_SPACING / 2) + (EYE_WIDTH / 2);
+        // Render Sharp Square-ish Eyes (28x20 with 2px radius)
+        int halfSpan = (EYE_SPACING / 2) + (BASE_EYE_W / 2);
         int cxL = 64 - halfSpan + (int)roundf(cur.gazeX) + shakeX;
         int cxR = 64 + halfSpan + (int)roundf(cur.gazeX) + shakeX;
         int cy  = EYE_CENTER_Y + (int)roundf(cur.gazeY) + bounceY;
 
-        drawOneEye(cxL, cy, EYE_WIDTH, (int)roundf(drawHL), drawTL, drawTT, drawBC, true);
-        drawOneEye(cxR, cy, EYE_WIDTH, (int)roundf(drawHR), drawTR, drawTT, drawBC, false);
+        drawSquareEye(cxL, cy, BASE_EYE_W, (int)roundf(cur.hL), cur.topL, cur.tiltTop, cur.botCurve, true, blinking);
+        drawSquareEye(cxR, cy, BASE_EYE_W, (int)roundf(cur.hR), cur.topR, cur.tiltTop, cur.botCurve, false, blinking);
 
-        if (ENABLE_MOUTH && state == STATE_SPEAKING) {
-            int mouthH = 2 + (int)((sinf(now * 0.028f) + 1.0f) * 2.0f);
-            display.fillRoundRect(56, EYE_CENTER_Y + EYE_HEIGHT / 2 + 5, 16, mouthH, 2, SSD1306_WHITE);
-        }
-
+        // State Visuals at bottom
         if (state == STATE_LISTENING) {
-            float amp = 2.0f + (smoothMic / 100.0f) * 6.0f;
-            float phase = now * 0.016f;
-            int prevX = 18, prevY = 55;
-            for (int x = 18; x <= 110; x += 3) {
-                float norm = (float)(x - 18) / 92.0f;
-                float env  = sinf(norm * PI);
-                int y = 55 + (int)(sinf(norm * 13.0f - phase) * amp * env);
-                if (x > 18) {
-                    display.drawLine(prevX, prevY, x, y, SSD1306_WHITE);
-                    display.drawLine(prevX, prevY + 1, x, y + 1, SSD1306_WHITE);
-                }
-                prevX = x;
-                prevY = y;
+            float amp = (smoothMic / 100.0f) * 12.0f;
+            if (amp < 2.0f) amp = 2.0f;
+            for (int i = 0; i < 9; i++) {
+                float h = sinf(now * 0.02f + i * 0.7f) * amp;
+                if (h < 0) h = -h;
+                int barH = 2 + (int)h;
+                display.drawFastVLine(64 + i * 4, 58 - barH / 2, barH, SSD1306_WHITE);
+                display.drawFastVLine(64 - i * 4, 58 - barH / 2, barH, SSD1306_WHITE);
             }
-        } else if (state == STATE_THINKING) {
-            for (int d = 0; d < 3; d++) {
-                float p = (sinf(now * 0.008f - d * 1.1f) + 1.0f) * 0.5f;
-                int r = (p > 0.65f) ? 3 : 2;
-                int dy = (int)(-p * 3.0f);
-                display.fillCircle(52 + d * 12, 57 + dy, r, SSD1306_WHITE);
-            }
-        } else if (state == STATE_SPEAKING && totalLines > 0) {
+        } 
+        else if (state == STATE_THINKING) {
+            float angle = now * 0.007f;
+            int rx = 64 + (int)(cosf(angle) * 7.0f);
+            int ry = 56 + (int)(sinf(angle) * 3.5f);
+            display.drawCircle(64, 56, 4, SSD1306_WHITE);
+            display.fillCircle(rx, ry, 2, SSD1306_WHITE);
+
+            uint8_t hx = (now >> 6) & 0xFF;
+            display.setTextSize(1);
+            display.setCursor(85, 53);
+            display.printf("0x%02X", hx);
+        } 
+        else if (state == STATE_SPEAKING && totalLines > 0) {
             int lineIdx = ((now - speakStartMs) / CAPTION_MS) % totalLines;
             singleLineCaption(localText, lineIdx, 54, true);
         }
 
         display.display();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS
     }
 }
 
@@ -623,7 +690,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     randomSeed(esp_random());
-    Serial.printf("\n=== DeskAI Unified Eye Engine (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+    Serial.printf("\n=== DeskAI Sharp RoboEyes Engine (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
 
     Wire.begin(OLED_SDA, OLED_SCL);
     if (!display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS)) {
@@ -631,13 +698,12 @@ void setup() {
         while (true) delay(1000);
     }
     Wire.setClock(400000);
-    display.invertDisplay(INVERT_DISPLAY);
 
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(16, 28);
-    display.print("Connecting WiFi...");
+    display.setCursor(14, 28);
+    display.print("[SYS] Booting Net...");
     display.display();
 
     audioRingBuf = xRingbufferCreate(RINGBUF_BYTES, RINGBUF_TYPE_BYTEBUF);
@@ -646,10 +712,17 @@ void setup() {
         while (true) delay(1000);
     }
 
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        Serial.println("[WiFi] Lost connection! Auto-reconnecting...");
+        WiFi.reconnect();
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
     WiFi.mode(WIFI_STA);
-    WiFi.setTxPower(WIFI_POWER_15dBm); // Prevents USB brownout spikes
+    WiFi.setTxPower(WIFI_POWER_15dBm);
     WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+
     Serial.printf("Connecting to Wi-Fi: %s", WIFI_SSID);
     while (WiFi.status() != WL_CONNECTED) {
         delay(300);

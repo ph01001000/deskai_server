@@ -12,6 +12,7 @@ const MsgTypeMic = 1
 const MsgTypeTTS = 2
 const MsgTypeStop = 3
 const MsgTypeStatus = 4
+const MsgTypeAudioConfig = 5
 const StateListening = 0
 const StateThinking = 1
 const StateSpeaking = 2
