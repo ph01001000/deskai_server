@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,11 +30,11 @@ type utteranceJob struct {
 	addr *net.UDPAddr
 }
 
-func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utterances <-chan utteranceJob) {
+func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utterances <-chan utteranceJob, stopChan <-chan struct{}) {
 	for job := range utterances {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		sendStatus(conn, job.addr, protocol.StateThinking, protocol.MoodNormal, "")
-		mood, reply, synth, err := pipeline.ProcessUtterance(ctx, job.pcm)
+		mood, track, reply, synth, err := pipeline.ProcessUtterance(ctx, job.pcm)
 		cancel()
 
 		if err != nil {
@@ -51,6 +52,37 @@ func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utt
 			sendTTS(conn, job.addr, synth)
 			time.Sleep(800 * time.Millisecond)
 		}
+
+		if mood == protocol.MoodMusic {
+			musicFile := filepath.Join("music", track)
+			if track == "" {
+				musicFile = "music/Metallica/01. Enter Sandman.flac"
+			}
+			select {
+			case <-stopChan:
+			default:
+			}
+
+			musicCtx, cancelMusic := context.WithCancel(context.Background())
+			defer cancelMusic()
+
+			go func() {
+				select {
+				case <-stopChan:
+					log.Println("Interrupt triggered! Stopping music...")
+					cancelMusic()
+					aiBusy.Store(false)
+				case <-musicCtx.Done():
+
+				}
+			}()
+
+			if err := streamMusic(musicCtx, conn, job.addr, musicFile); err != nil {
+				log.Printf("Music streaming ended: %v\n", err)
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+
 		sendStatus(conn, job.addr, protocol.StateIdle, protocol.MoodNormal, "")
 		aiBusy.Store(false)
 	}
@@ -74,7 +106,7 @@ func sendStatus(conn *net.UDPConn, addr *net.UDPAddr, state, mood uint8, text st
 }
 
 func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
-	sendAudioConfig(conn, addr, 24000)
+	sendAudioConfig(conn, addr, 22000)
 	time.Sleep(5 * time.Millisecond)
 	pktBuf := make([]byte, protocol.HeaderSize+protocol.MaxSamples*2)
 	var seq uint32 = 1
@@ -106,6 +138,30 @@ func sendAudioConfig(conn *net.UDPConn, addr *net.UDPAddr, sampleRate uint32) {
 		return
 	}
 	conn.WriteToUDP(pktBuf[:n], addr)
+}
+
+func streamMusic(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, filePath string) error {
+
+	sendAudioConfig(conn, addr, 24000)
+	time.Sleep(10 * time.Millisecond)
+
+	sendStatus(conn, addr, protocol.StateSpeaking, protocol.MoodCool, "♪ Playing Music ♪")
+
+	pktBuf := make([]byte, protocol.HeaderSize+protocol.MaxSamples*2)
+	var seq uint32 = 1
+
+	return ai.StreamMP3(ctx, filePath, func(chunk []byte) error {
+		n, err := protocol.EncodePacket(pktBuf, protocol.PacketHeader{Seq: seq, Msgtype: protocol.MsgTypeTTS}, chunk)
+		if err != nil {
+			return err
+		}
+		_, err = conn.WriteToUDP(pktBuf[:n], addr)
+		if err != nil {
+			return err
+		}
+		seq++
+		return nil
+	})
 }
 
 func main() {
@@ -143,8 +199,9 @@ func main() {
 		log.Fatal(err)
 	}
 	pipeline := ai.NewPipeline(stt, llm, tts)
+	stopChan := make(chan struct{}, 1)
 
-	go aiWorker(&aiBusy, conn, pipeline, utterances)
+	go aiWorker(&aiBusy, conn, pipeline, utterances, stopChan)
 
 	var speechBuf []byte
 	recording := false
@@ -168,6 +225,33 @@ func main() {
 			continue
 		} else {
 			// fmt.Printf("%s, %d, %d ,%d \n", Addr, header.Seq, header.Msgtype, header.Length) // Uncomment for debug to check if packets are being received..
+		}
+
+		if header.Msgtype == protocol.MsgTypeStop {
+			select {
+			case stopChan <- struct{}{}:
+			default:
+			}
+
+			if recording && len(speechBuf) > 0 {
+				log.Println("[PTT] Finalizing speech and dispatching to Gemini...")
+				pcmCopy := append([]byte(nil), speechBuf...)
+				select {
+				case utterances <- utteranceJob{pcm: pcmCopy, addr: Addr}:
+					aiBusy.Store(true)
+					sendStatus(conn, Addr, protocol.StateThinking, protocol.MoodNormal, "")
+				default:
+					log.Print("AI busy, dropping utterance...")
+				}
+				speechBuf = speechBuf[:0]
+				recording = false
+				silenceCount = 0
+				loudPackets = 0
+				preRoll = preRoll[:0]
+			}
+
+			syncpool.Put(bufPtr)
+			continue
 		}
 
 		if aiBusy.Load() {

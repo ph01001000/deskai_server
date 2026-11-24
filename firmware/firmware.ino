@@ -12,22 +12,22 @@
 #include "secrets.h"
 
 // =========================================================
-// FLUXGARAGE-STYLE SHARP ROBOEYES TUNING
+// SLEEK INTERFACE + SHARP ROBOEYES TUNING
 // =========================================================
-static const int      BASE_EYE_W        = 28;    // Matches your sketch: 28px
-static const int      BASE_EYE_H        = 20;    // Matches your sketch: 20px
-static const int      EYE_RADIUS        = 2;     // Crisp sharp corners (2px radius)
+static const int      BASE_EYE_W        = 28;    // Sharp square-ish width
+static const int      BASE_EYE_H        = 20;    // Sharp square-ish height
+static const int      EYE_RADIUS        = 2;     // Crisp 2px corner radius
 static const int      EYE_SPACING       = 14;    // Gap between eye inner edges
-static const int      EYE_CENTER_Y      = 28;    // Vertical eye center
-static const float    EYE_SMOOTHNESS    = 0.32f; // Snappy half-step kinetic easing
-static const int      LOOK_RANGE_X      = 16;    // Cardinal glance range X
-static const int      LOOK_RANGE_Y      = 6;     // Cardinal glance range Y
-static const int      CURIOSITY_GROWTH  = 8;     // FluxGarage curiosity: +8px outer eye!
-static const uint32_t BLINK_MIN_MS      = 2500;  // 3s +- 1s
-static const uint32_t BLINK_MAX_MS      = 4500;  
-static const uint32_t SLEEP_AFTER_MS    = 45000; 
-static const uint32_t CAPTION_MS        = 1300;  
-static const float    PLAYBACK_GAIN     = 0.55f; 
+static const int      EYE_CENTER_Y      = 30;    // Perfectly centered under top HUD
+static const float    EYE_SMOOTHNESS    = 0.32f; // Snappy kinetic tweening
+static const int      LOOK_RANGE_X      = 16;    // Wide cardinal glance X
+static const int      LOOK_RANGE_Y      = 6;     // Wide cardinal glance Y
+static const int      CURIOSITY_GROWTH  = 8;     // Outer eye stretches +8px on side looks!
+static const uint32_t BLINK_MIN_MS      = 2600;  // Blink interval min
+static const uint32_t BLINK_MAX_MS      = 4800;  // Blink interval max
+static const uint32_t SLEEP_AFTER_MS    = 45000; // Screen dimming after 45s idle
+static const uint32_t CAPTION_MS        = 1300;  // Caption speed
+static const float    PLAYBACK_GAIN     = 1.0f; // Volume
 // =========================================================
 
 static const uint16_t SERVER_PORT           = 8000;
@@ -35,6 +35,7 @@ static const uint16_t LOCAL_UDP_PORT        = 8001;
 static const uint16_t PROTOCOL_MAGIC        = 0xAE05;
 static const uint8_t  MSG_TYPE_MIC          = 1;
 static const uint8_t  MSG_TYPE_TTS          = 2;
+static const uint8_t  MSG_TYPE_STOP         = 3;
 static const uint8_t  MSG_TYPE_STATUS       = 4;
 static const uint8_t  MSG_TYPE_AUDIO_CONFIG = 5;
 
@@ -66,6 +67,7 @@ static const uint8_t  MOOD_COOL        = 6;
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 #define I2C_ADDRESS   0x3C
+#define BOOT_BTN  0
 
 static const uint32_t MIC_SAMPLE_RATE   = 16000;
 static const uint32_t AMP_SAMPLE_RATE   = 24000;
@@ -376,12 +378,59 @@ void ampTask(void *param) {
 }
 
 // ---------------------------------------------------------
-// FLUXGARAGE SHARP SQUARE-EYE DRAWING ROUTINE
+// HUD & NETWORK INTERFACE OVERLAY
+// ---------------------------------------------------------
+
+void drawTopHUD(uint8_t state) {
+    // 1. Tactical corner brackets
+    display.drawFastHLine(1, 1, 6, SSD1306_WHITE);
+    display.drawFastVLine(1, 1, 6, SSD1306_WHITE);
+    display.drawFastHLine(121, 1, 6, SSD1306_WHITE);
+    display.drawFastVLine(126, 1, 6, SSD1306_WHITE);
+    display.drawFastHLine(1, 62, 6, SSD1306_WHITE);
+    display.drawFastVLine(1, 57, 6, SSD1306_WHITE);
+    display.drawFastHLine(121, 62, 6, SSD1306_WHITE);
+    display.drawFastVLine(126, 57, 6, SSD1306_WHITE);
+
+    // 2. Network Indicator (Wi-Fi Signal Bars)
+    if (WiFi.status() == WL_CONNECTED) {
+        int rssi = WiFi.RSSI();
+        int bars = (rssi > -65) ? 4 : (rssi > -75) ? 3 : (rssi > -85) ? 2 : 1;
+        for (int b = 0; b < 4; b++) {
+            if (b < bars) {
+                display.drawFastVLine(10 + b * 2, 7 - b, b + 1, SSD1306_WHITE);
+            }
+        }
+    } else {
+        // Disconnected warning cross
+        display.drawLine(10, 3, 16, 7, SSD1306_WHITE);
+        display.drawLine(10, 7, 16, 3, SSD1306_WHITE);
+    }
+
+    // 3. Top Status Telemetry Tag
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(34, 1);
+
+    switch (state) {
+        case STATE_LISTENING: display.print("[REC//AUD]"); break;
+        case STATE_THINKING:  display.print("[PROC//AI]"); break;
+        case STATE_SPEAKING:  display.print("[OUT//VOX]"); break;
+        default:              display.print("[SYS//OK] "); break;
+    }
+
+    // Micro grid divider dots on top right
+    for (int x = 96; x < 118; x += 4) {
+        display.drawPixel(x, 4, SSD1306_WHITE);
+    }
+}
+
+// ---------------------------------------------------------
+// SHARP SQUARE ROBOEYES (28x20, radius 2, NO CROSSHAIR)
 // ---------------------------------------------------------
 
 void drawSquareEye(int cx, int cy, int w, int h, float topCut, float tiltTop, float botCurve, bool isLeft, bool blinking) {
     if (blinking) {
-        // Fast, clean horizontal blink line
         display.fillRoundRect(cx - w / 2, cy - 1, w, 2, 1, SSD1306_WHITE);
         return;
     }
@@ -390,7 +439,7 @@ void drawSquareEye(int cx, int cy, int w, int h, float topCut, float tiltTop, fl
     int x = cx - w / 2;
     int y = cy - h / 2;
 
-    // Solid, sharp square-like eye with radius 2 (Exact FluxGarage RoboEyes look!)
+    // Solid sharp rectangle with crisp 2px corner radius
     display.fillRoundRect(x, y, w, h, EYE_RADIUS, SSD1306_WHITE);
 
     // Eyelid top cutoff (for tired/annoyed)
@@ -440,7 +489,7 @@ int singleLineCaption(const char *txt, int targetLine, int yPos, bool draw) {
             memcpy(lineBuf, txt + idx, take);
             lineBuf[take] = '\0';
             int xStart = (128 - take * 6) / 2;
-            if (xStart < 4) xStart = 4;
+            if (xStart < 10) xStart = 10;
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             display.setTextWrap(false);
@@ -501,7 +550,7 @@ void oledTask(void *param) {
 
         if (state != STATE_IDLE) lastInteraction = now;
         if (prevState == STATE_SPEAKING && state == STATE_IDLE && holdMood != MOOD_NORMAL) {
-            moodHoldUntil = now + 2400;
+            moodHoldUntil = now + 2200;
         }
         prevState = state;
 
@@ -572,19 +621,23 @@ void oledTask(void *param) {
                     tgt = {0.0f, 4.0f, baseH * 0.90f, baseH * 0.90f, 1.0f, 1.0f, -baseH * 0.45f, 0.0f};
                     break;
                 default:
+                    // Normal vocal resonance
                     tgt = {0.0f, -1.0f, baseH + talkPulse, baseH + talkPulse, 0.0f, 0.0f, 0.0f, 0.0f};
                     break;
             }
 
         } else {
-            // IDLE: FluxGarage 9-Cardinal Direction Idle Mode + Curiosity Mode!
+            // IDLE: Always keep expressions NORMAL, active cardinal glances + curiosity!
+            tgt.topL = 0; tgt.topR = 0;
+            tgt.tiltTop = 0; tgt.botCurve = 0;
+
             uint32_t idleTime = now - lastInteraction;
             if (idleTime > SLEEP_AFTER_MS) {
-                // Sleep line
-                tgt = {0.0f, 3.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                tgt.gazeX = 0; tgt.gazeY = 3.0f;
+                tgt.hL = 3.0f; tgt.hR = 3.0f;
             } else {
                 if (now > nextIdleLookMs) {
-                    // Pick one of the 9 FluxGarage cardinal positions!
+                    // Pick one of the 9 FluxGarage cardinal positions
                     int pos = random(0, 9);
                     switch (pos) {
                         case 0: // Center
@@ -625,13 +678,12 @@ void oledTask(void *param) {
                             break;
                     }
 
-                    // setIdleMode(ON, 2, 2): random interval 1.5s - 3.2s
                     nextIdleLookMs = now + random(1500, 3200);
                 }
             }
         }
 
-        // Kinetic half-step interpolation (RoboEyes smooth tweening)
+        // Half-step kinetic interpolation
         cur.gazeX    = lerpf(cur.gazeX,    tgt.gazeX,    EYE_SMOOTHNESS);
         cur.gazeY    = lerpf(cur.gazeY,    tgt.gazeY,    EYE_SMOOTHNESS);
         cur.hL       = lerpf(cur.hL,       tgt.hL,       EYE_SMOOTHNESS);
@@ -643,7 +695,10 @@ void oledTask(void *param) {
 
         display.clearDisplay();
 
-        // Render Sharp Square-ish Eyes (28x20 with 2px radius)
+        // 1. Draw Sleek Top HUD & Network Telemetry
+        drawTopHUD(state);
+
+        // 2. Render Sharp Square-ish Eyes
         int halfSpan = (EYE_SPACING / 2) + (BASE_EYE_W / 2);
         int cxL = 64 - halfSpan + (int)roundf(cur.gazeX) + shakeX;
         int cxR = 64 + halfSpan + (int)roundf(cur.gazeX) + shakeX;
@@ -652,7 +707,7 @@ void oledTask(void *param) {
         drawSquareEye(cxL, cy, BASE_EYE_W, (int)roundf(cur.hL), cur.topL, cur.tiltTop, cur.botCurve, true, blinking);
         drawSquareEye(cxR, cy, BASE_EYE_W, (int)roundf(cur.hR), cur.topR, cur.tiltTop, cur.botCurve, false, blinking);
 
-        // State Visuals at bottom
+        // 3. State-Specific Visuals at bottom
         if (state == STATE_LISTENING) {
             float amp = (smoothMic / 100.0f) * 12.0f;
             if (amp < 2.0f) amp = 2.0f;
@@ -677,8 +732,9 @@ void oledTask(void *param) {
             display.printf("0x%02X", hx);
         } 
         else if (state == STATE_SPEAKING && totalLines > 0) {
+            display.drawFastHLine(14, 48, 100, SSD1306_WHITE);
             int lineIdx = ((now - speakStartMs) / CAPTION_MS) % totalLines;
-            singleLineCaption(localText, lineIdx, 54, true);
+            singleLineCaption(localText, lineIdx, 53, true);
         }
 
         display.display();
@@ -686,11 +742,67 @@ void oledTask(void *param) {
     }
 }
 
+static bool isPushToTalking = false;
+
+void triggerPushToTalkStart() {
+    Serial.println("[PTT] Button PRESSED -> Listening...");
+
+    size_t itemSize = 0;
+    void *item = NULL;
+    while ((item = xRingbufferReceiveUpTo(audioRingBuf, &itemSize, 0, 1024)) != NULL) {
+        vRingbufferReturnItem(audioRingBuf, item);
+    }
+    flushSilence();
+    isSpeaking = false;
+    lastSpeakEndMs = 0; 
+
+    portENTER_CRITICAL(&uiMux);
+    uiState = STATE_LISTENING;
+    pendingIdle = false;
+    portEXIT_CRITICAL(&uiMux);
+
+
+    if (udpSock >= 0) {
+        PacketHeader stopHdr;
+        stopHdr.seq    = 0;
+        stopHdr.magic  = PROTOCOL_MAGIC;
+        stopHdr.length = 0;
+        stopHdr.type   = MSG_TYPE_STOP;
+        sendto(udpSock, &stopHdr, sizeof(PacketHeader), 0,
+               (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+    }
+    isPushToTalking = true;
+}
+
+void triggerPushToTalkEnd() {
+    if (!isPushToTalking) return;
+    Serial.println("[PTT] Button RELEASED -> Processing utterance...");
+    isPushToTalking = false;
+
+
+    portENTER_CRITICAL(&uiMux);
+    uiState = STATE_THINKING;
+    portEXIT_CRITICAL(&uiMux);
+    if (udpSock >= 0) {
+        PacketHeader stopHdr;
+        stopHdr.seq    = 0;
+        stopHdr.magic  = PROTOCOL_MAGIC;
+        stopHdr.length = 0;
+        stopHdr.type   = MSG_TYPE_STOP;
+        sendto(udpSock, &stopHdr, sizeof(PacketHeader), 0,
+               (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+    }
+}
+
+
 void setup() {
     Serial.begin(115200);
     delay(500);
     randomSeed(esp_random());
-    Serial.printf("\n=== DeskAI Sharp RoboEyes Engine (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+    Serial.printf("\n=== DeskAI Unified Engine (Heap: %lu B) ===\n", (unsigned long)ESP.getFreeHeap());
+
+
+    pinMode(BOOT_BTN, INPUT_PULLUP);
 
     Wire.begin(OLED_SDA, OLED_SCL);
     if (!display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS)) {
@@ -742,5 +854,16 @@ void setup() {
 }
 
 void loop() {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    static bool lastBtn = HIGH;
+    bool btn = digitalRead(BOOT_BTN);
+
+    if (btn == LOW && lastBtn == HIGH) {
+        triggerPushToTalkStart();
+    }
+    else if (btn == HIGH && lastBtn == LOW) {
+        triggerPushToTalkEnd();
+    }
+
+    lastBtn = btn;
+    vTaskDelay(pdMS_TO_TICKS(20)); // 50 Hz poll rate
 }

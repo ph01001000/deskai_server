@@ -25,6 +25,7 @@ const MoodLaugh = 3
 const MoodAngry = 4
 const MoodSad = 5
 const MoodCool = 6
+const MoodMusic = 7
 
 type PacketHeader struct {
 	Seq     uint32
