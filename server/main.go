@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -53,6 +54,9 @@ func aiWorker(aiBusy *atomic.Bool, conn *net.UDPConn, pipeline *ai.Pipeline, utt
 			time.Sleep(800 * time.Millisecond)
 		}
 
+		if mood == protocol.MoodCommand {
+			executeSystemCommand(track)
+		}
 		if mood == protocol.MoodMusic {
 			musicFile := filepath.Join("music", track)
 			if track == "" {
@@ -106,7 +110,7 @@ func sendStatus(conn *net.UDPConn, addr *net.UDPAddr, state, mood uint8, text st
 }
 
 func sendTTS(conn *net.UDPConn, addr *net.UDPAddr, pcm []byte) {
-	sendAudioConfig(conn, addr, 22000)
+	sendAudioConfig(conn, addr, 22050)
 	time.Sleep(5 * time.Millisecond)
 	pktBuf := make([]byte, protocol.HeaderSize+protocol.MaxSamples*2)
 	var seq uint32 = 1
@@ -162,6 +166,39 @@ func streamMusic(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, file
 		seq++
 		return nil
 	})
+}
+
+func executeSystemCommand(cmd string) {
+	log.Printf("[CMD] Executing server action: %s\n", cmd)
+
+	switch cmd {
+	case "reboot":
+		go func() {
+			time.Sleep(4 * time.Second)
+			// out, err := exec.Command("sudo", "reboot").CombinedOutput()
+			// if err != nil {
+			// log.Printf("[CMD] 'sudo reboot' failed: %v (output: %s)\n", err, string(out))
+			out2, err2 := exec.Command("systemctl", "reboot").CombinedOutput()
+			if err2 != nil {
+				log.Printf("[CMD] 'systemctl reboot' also failed: %v (output: %s)\n", err2, string(out2))
+			}
+			// }
+		}()
+
+	case "suspend":
+		go func() {
+			time.Sleep(4 * time.Second)
+			exec.Command("systemctl", "suspend").Run()
+		}()
+
+	case "docker_restart":
+		go func() {
+			exec.Command("sudo", "systemctl", "restart", "docker").Run()
+		}()
+
+	default:
+		log.Printf("[CMD] Unknown or unauthorized command: %s\n", cmd)
+	}
 }
 
 func main() {

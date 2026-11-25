@@ -35,15 +35,18 @@ func NewGeminiClient(ctx context.Context, apiKey string) (*GeminiClient, error) 
 	return &newClient, nil
 }
 
-func (g *GeminiClient) Reply(ctx context.Context, prompt string, availableTracks []string) (string, error) {
+func (g *GeminiClient) Reply(ctx context.Context, prompt string, availableTracks []string, systemVitals string) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return "", errors.New("empty prompt")
 	}
 	trackListStr := strings.Join(availableTracks, ", ")
+
 	systemPrompt := fmt.Sprintf(
-		"You are a concise voice desk assistant. Reply in 1-3 plain spoken sentences with NO markdown, asterisks, or bullet points, in a cool badass manner. Start each reply with one of the tags: [NORMAL], [ANNOYED], [HAPPY], [LAUGH], [ANGRY], [SAD], [COOL], [MUSIC:<track>]. Available music tracks: [%s]. If the user asks to play music or describes a vibe, pick the best matching track from the available music list and start your reply with [MUSIC:<selected_track_path>] followed by a short cool remark. If no specific vibe matches, pick any track. Example: [MUSIC:Metallica/Enter_Sandman.flac] Cranking up the volume for you. If the user asks for the next song, to skip, or to change the vibe, pick a different track from the available music tracks list and reply with [MUSIC:<track>]. If the user asks to stop or turn off the music, reply with [COOL] or [NORMAL] without any music tag.",
+		"You are a concise voice desk assistant. Reply in 1-3 plain spoken sentences with NO markdown, asterisks, or bullet points, in a cool badass manner. Start each reply with one of the tags: [NORMAL], [ANNOYED], [HAPPY], [LAUGH], [ANGRY], [SAD], [COOL], [MUSIC:<track>], [CMD:<action>]. Available music tracks: [%s]. Live Server Vitals: [%s]. If the user asks about the server, system status, temperature, RAM, CPU, or storage, use the live server vitals to answer accurately. If the user asks for music, pick a track with [MUSIC:<track>]. If the user asks to reboot or perform a server action, reply with [CMD:reboot] followed by a cool confirmation.",
 		trackListStr,
+		systemVitals,
 	)
+
 	res, err := g.client.Models.GenerateContent(ctx, g.model, genai.Text(prompt), &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: systemPrompt}}},
 	})

@@ -37,7 +37,8 @@ func (p *Pipeline) ProcessUtterance(ctx context.Context, pcm []byte) (uint8, str
 	}
 	log.Printf("User: %s\n", cleanIn)
 	tracks := GetAvailableTracks("music")
-	reply, err := p.llm.Reply(ctx, cleanIn, tracks)
+	vitals := getSystemVitals()
+	reply, err := p.llm.Reply(ctx, cleanIn, tracks, vitals)
 	if err != nil {
 		return 0, "", "", nil, err
 	}
@@ -70,6 +71,12 @@ func parseMood(raw string) (uint8, string, string) {
 				return mood, track, clean
 			}
 
+			if strings.HasPrefix(tagUpper, "[CMD:") {
+				mood = protocol.MoodCommand
+				cmd := strings.TrimSpace(tag[5 : len(tag)-1]) // grabs "reboot"
+				return mood, cmd, clean
+			}
+
 			switch tagUpper {
 			case "[ANNOYED]":
 				mood = protocol.MoodAnnoyed
@@ -83,6 +90,7 @@ func parseMood(raw string) (uint8, string, string) {
 				mood = protocol.MoodSad
 			case "[COOL]":
 				mood = protocol.MoodCool
+
 			default:
 				mood = protocol.MoodNormal
 			}
